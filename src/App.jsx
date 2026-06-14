@@ -298,6 +298,10 @@ export default function RadioPucciotto() {
         @keyframes fadeIn { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
         .upload-panel { animation: fadeIn 0.2s ease; }
         .custom-badge { background: ${RED}; color: ${WHITE}; font-size: 9px; padding: 1px 5px; border-radius: 3px; font-weight: 700; letter-spacing: 0.5px; }
+        @media (max-width: 480px) {
+          .player-controls { gap: 10px !important; }
+          .vol-control, .ad-counter, .ctrl-spacer { display: none !important; }
+        }
       `}</style>
 
       {/* Header */}
@@ -400,21 +404,23 @@ export default function RadioPucciotto() {
           </div>
 
           {/* Controlli */}
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "20px" }}>
-            <Volume2 size={18} color="#888" />
-            <input type="range" min="0" max="1" step="0.05" value={volume} onChange={(e) => setVolume(parseFloat(e.target.value))} style={{ width: "70px" }} />
-            <div style={{ flex: 1 }} />
-            <button className="pc-btn" onClick={goPrev} style={{ background: "transparent", border: "none", color: BLACK, cursor: "pointer" }}>
+          <div className="player-controls" style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "20px" }}>
+            <div className="vol-control" style={{ display: "flex", alignItems: "center", gap: "10px", flexShrink: 0 }}>
+              <Volume2 size={18} color="#888" />
+              <input type="range" min="0" max="1" step="0.05" value={volume} onChange={(e) => setVolume(parseFloat(e.target.value))} style={{ width: "70px" }} />
+            </div>
+            <div className="ctrl-spacer" style={{ flex: 1 }} />
+            <button className="pc-btn" onClick={goPrev} style={{ background: "transparent", border: "none", color: BLACK, cursor: "pointer", flexShrink: 0 }}>
               <SkipBack size={22} fill={BLACK} />
             </button>
-            <button className="pc-btn" onClick={() => setIsPlaying((p) => !p)} style={{ width: 56, height: 56, borderRadius: "50%", background: RED, border: "none", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}>
+            <button className="pc-btn" onClick={() => setIsPlaying((p) => !p)} style={{ width: 56, height: 56, minWidth: 56, minHeight: 56, borderRadius: "50%", background: RED, border: "none", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0 }}>
               {isPlaying ? <Pause size={24} color={WHITE} fill={WHITE} /> : <Play size={24} color={WHITE} fill={WHITE} />}
             </button>
-            <button className="pc-btn" onClick={goNext} style={{ background: "transparent", border: "none", color: BLACK, cursor: "pointer" }}>
+            <button className="pc-btn" onClick={goNext} style={{ background: "transparent", border: "none", color: BLACK, cursor: "pointer", flexShrink: 0 }}>
               <SkipForward size={22} fill={BLACK} />
             </button>
-            <div style={{ flex: 1 }} />
-            <div style={{ fontSize: "11px", color: "#888", width: "70px", textAlign: "right" }}>Prox. spot: {playsUntilAd}</div>
+            <div className="ctrl-spacer" style={{ flex: 1 }} />
+            <div className="ad-counter" style={{ fontSize: "11px", color: "#888", width: "70px", textAlign: "right", flexShrink: 0 }}>Prox. spot: {playsUntilAd}</div>
           </div>
 
           <audio ref={audioRef} onTimeUpdate={handleTimeUpdate} onEnded={goNext}
