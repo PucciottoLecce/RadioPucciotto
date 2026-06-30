@@ -1,7 +1,6 @@
 import React, { useState, useRef, useEffect, useMemo } from "react";
 import { Play, Pause, SkipForward, SkipBack, Volume2, Trash2, Shuffle, Music } from "lucide-react";
 
-const JAMENDO_CLIENT_ID = "cd925797";
 const RED   = "#c0392b";
 const WHITE = "#ffffff";
 const BLACK = "#1a1a1a";
@@ -15,6 +14,22 @@ const FALLBACK_TRACKS = [
   { id: 3, title: "Onde Lunghe", artist: "SoundHelix", category: "Chill", url: "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-3.mp3", color: "#60A5FA", isCustom: false },
   { id: 4, title: "Vento del Sud", artist: "SoundHelix", category: "Acustico", url: "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-4.mp3", color: "#4ADE80", isCustom: false },
 ];
+
+// Chiave API YouTube Data v3 — creala gratis su https://console.cloud.google.com/
+// (abilita "YouTube Data API v3" e genera una API key, poi incollala qui sotto)
+const YOUTUBE_API_KEY = "AIzaSyBCtBXIX_xFVF7x4itMzFxvP_toIpOJiFU";
+
+// Playlist di riserva usata mentre la ricerca automatica è in corso, o se fallisce
+const YOUTUBE_FALLBACK_TRACKS = [
+  { id: "yt1", videoId: "dQw4w9WgXcQ", title: "Never Gonna Give You Up", artist: "Rick Astley",  category: "Pop",         color: "#c0392b" },
+  { id: "yt2", videoId: "fJ9rUzIMcZQ", title: "Bohemian Rhapsody",        artist: "Queen",         category: "Rock",        color: "#e67e22" },
+  { id: "yt3", videoId: "JGwWNGJdvx8", title: "Shape of You",             artist: "Ed Sheeran",    category: "Pop",         color: "#c0392b" },
+  { id: "yt4", videoId: "kJQP7kiw5Fk", title: "Despacito",                artist: "Luis Fonsi",    category: "Latino",      color: "#27ae60" },
+  { id: "yt5", videoId: "hTWKbfoikeg", title: "Smells Like Teen Spirit",  artist: "Nirvana",       category: "Rock",        color: "#e67e22" },
+  { id: "yt6", videoId: "rYEDA3JcQqw", title: "Rolling in the Deep",      artist: "Adele",         category: "Soul",        color: "#8e44ad" },
+  { id: "yt7", videoId: "4NRXx6U8ABQ", title: "Blinding Lights",         artist: "The Weeknd",    category: "Elettronica", color: "#2c3e50" },
+  { id: "yt8", videoId: "OPf0YbXqDm0", title: "Uptown Funk",              artist: "Bruno Mars",    category: "Funk",        color: "#d35400" },
+].map((t) => ({ ...t, url: null, isCustom: false }));
 
 const AD_SPOTS = [
   "/ads/spot-piucciotto.mp3",
@@ -39,7 +54,7 @@ function shuffleArray(arr) {
 }
 
 export default function RadioPucciotto() {
-  const [tracks, setTracks] = useState(FALLBACK_TRACKS);
+  const [tracks, setTracks] = useState(YOUTUBE_FALLBACK_TRACKS);
   const [customTracks, setCustomTracks] = useState([]);
 
   const [loadingTracks, setLoadingTracks] = useState(true);
@@ -60,6 +75,8 @@ export default function RadioPucciotto() {
   const lastSpotIndexRef = useRef(-1);
   const audioRef = useRef(null);
   const adAudioRef = useRef(null);
+  const ytPlayerRef = useRef(null);
+  const [ytReady, setYtReady] = useState(false);
 
   // Lista base (jamendo + custom), mai shuffled
   const baseList = useMemo(() => [...tracks, ...customTracks], [tracks, customTracks]);
@@ -103,8 +120,14 @@ export default function RadioPucciotto() {
       .catch(() => {});
   }, []);
 
-  // Carica da Jamendo
+  // Carica automaticamente i brani più popolari per genere da YouTube Data API v3
   useEffect(() => {
+    if (!YOUTUBE_API_KEY || YOUTUBE_API_KEY.startsWith("INSERISCI")) {
+      setLoadError("Imposta YOUTUBE_API_KEY in App.jsx. Uso playlist di riserva.");
+      setLoadingTracks(false);
+      return;
+    }
+
     const colorFor = (() => {
       const map = {};
       let i = 0;
@@ -114,31 +137,28 @@ export default function RadioPucciotto() {
       };
     })();
 
-    const GENRES = [
-      { label: "Pop",        offset: 0 },
-      { label: "Rock",       offset: 10 },
-      { label: "Elettronica", offset: 20 },
-      { label: "Jazz",       offset: 30 },
-      { label: "Classica",   offset: 40 },
-      { label: "Hip Hop",    offset: 50 },
-    ];
+    const GENRES = ["Pop", "Rock", "Elettronica", "Hip Hop", "Reggaeton", "RnB"];
     const PER_GENRE = 8;
 
-    const fetchSlice = ({ label, offset }) =>
-      fetch(`https://api.jamendo.com/v3.0/tracks/?client_id=${JAMENDO_CLIENT_ID}&format=json&limit=${PER_GENRE}&order=popularity_total&offset=${offset}`)
-        .then((r) => r.json())
+    const fetchSlice = (label) => {
+      const q = encodeURIComponent(`${label} official music video`);
+      const url = `https://www.googleapis.com/youtube/v3/search?part=snippet&q=${q}&type=video&videoCategoryId=10&order=viewCount&maxResults=${PER_GENRE}&key=${YOUTUBE_API_KEY}`;
+      return fetch(url)
+        .then((r) => { if (!r.ok) throw new Error("yt api error " + r.status); return r.json(); })
         .then((data) =>
-          (data.results || []).map((t) => ({
-            id: t.id + "_" + label,
-            title: t.name,
-            artist: t.artist_name,
+          (data.items || []).map((it) => ({
+            id: it.id.videoId + "_" + label,
+            videoId: it.id.videoId,
+            title: it.snippet.title,
+            artist: it.snippet.channelTitle,
             category: label,
-            url: t.audio,
             color: colorFor(label),
             isCustom: false,
+            url: null,
           }))
         )
         .catch(() => []);
+    };
 
     Promise.all(GENRES.map(fetchSlice))
       .then((arrays) => {
@@ -148,9 +168,38 @@ export default function RadioPucciotto() {
         setLoadingTracks(false);
       })
       .catch(() => {
-        setLoadError("Impossibile caricare i brani da Jamendo. Uso playlist di riserva.");
+        setLoadError("Impossibile caricare i brani da YouTube. Uso playlist di riserva.");
         setLoadingTracks(false);
       });
+  }, []);
+
+  // Carica lo script IFrame API di YouTube e crea il player una sola volta
+  useEffect(() => {
+    function createPlayer() {
+      ytPlayerRef.current = new window.YT.Player("yt-player", {
+        height: "84",
+        width: "84",
+        videoId: YOUTUBE_FALLBACK_TRACKS[0]?.videoId,
+        playerVars: { controls: 0, disablekb: 1, modestbranding: 1, rel: 0 },
+        events: {
+          onReady: () => { ytPlayerRef.current.setVolume(volume * 100); setYtReady(true); },
+          onStateChange: (e) => {
+            if (e.data === window.YT.PlayerState.ENDED) goNext();
+            if (e.data === window.YT.PlayerState.PLAYING) setStatus("In riproduzione");
+            if (e.data === window.YT.PlayerState.PAUSED) setStatus("In pausa");
+          },
+        },
+      });
+    }
+
+    if (window.YT && window.YT.Player) {
+      createPlayer();
+    } else {
+      const tag = document.createElement("script");
+      tag.src = "https://www.youtube.com/iframe_api";
+      document.body.appendChild(tag);
+      window.onYouTubeIframeAPIReady = createPlayer;
+    }
   }, []);
 
   // Categorie derivate sempre in modo reattivo, senza state separato
@@ -179,10 +228,24 @@ export default function RadioPucciotto() {
   // Quando cambia il volume
   useEffect(() => {
     if (audioRef.current) audioRef.current.volume = volume;
+    ytPlayerRef.current?.setVolume?.(volume * 100);
   }, [volume]);
 
   // Quando cambia isPlaying (senza cambiare brano)
   useEffect(() => {
+    const isYT = current && !current.isCustom;
+    if (isYT) {
+      if (!ytReady || !ytPlayerRef.current) return;
+      if (isPlaying) {
+        shouldPlayRef.current = true;
+        ytPlayerRef.current.playVideo();
+      } else {
+        shouldPlayRef.current = false;
+        ytPlayerRef.current.pauseVideo();
+        setStatus("In pausa");
+      }
+      return;
+    }
     if (!audioRef.current) return;
     if (isPlaying) {
       shouldPlayRef.current = true;
@@ -196,17 +259,43 @@ export default function RadioPucciotto() {
       audioRef.current.pause();
       setStatus("In pausa");
     }
-  }, [isPlaying]);
+  }, [isPlaying, ytReady]);
 
-  // Quando cambia il brano: carica e aspetta onCanPlay per fare play
+  // Quando cambia il brano: carica il video su YouTube (o il file <audio> per "Le mie canzoni")
   useEffect(() => {
-    if (!audioRef.current || !current?.url) return;
-    audioRef.current.src = current.url;
-    audioRef.current.load();
+    if (!current) return;
     setStatus("Caricamento...");
     setProgress(0);
     setDuration(0);
-  }, [current?.url]);
+
+    if (current.isCustom) {
+      // Brani caricati dall'utente: restano riprodotti via tag <audio>
+      ytPlayerRef.current?.pauseVideo?.();
+      if (audioRef.current) {
+        audioRef.current.src = current.url;
+        audioRef.current.load();
+      }
+    } else if (ytReady && current.videoId) {
+      if (isPlaying || shouldPlayRef.current) {
+        ytPlayerRef.current.loadVideoById(current.videoId);
+      } else {
+        ytPlayerRef.current.cueVideoById(current.videoId);
+      }
+    }
+  }, [current?.id, ytReady]);
+
+  // Polling per aggiornare avanzamento/durata del player YouTube
+  useEffect(() => {
+    if (current?.isCustom) return;
+    const id = setInterval(() => {
+      const p = ytPlayerRef.current;
+      if (p && p.getCurrentTime) {
+        setProgress(p.getCurrentTime() || 0);
+        setDuration(p.getDuration() || 0);
+      }
+    }, 500);
+    return () => clearInterval(id);
+  }, [current?.isCustom]);
 
   const removeCustomTrack = (id) => {
     setCustomTracks((prev) => {
@@ -247,29 +336,39 @@ export default function RadioPucciotto() {
   };
 
   const playSpotInBackground = () => {
-    if (!adAudioRef.current || !audioRef.current) return;
-    const musicAudio = audioRef.current;
+    if (!adAudioRef.current) return;
     const spotAudio = adAudioRef.current;
+    const isYT = current && !current.isCustom;
     const originalVolume = volume;
-    musicAudio.volume = originalVolume * 0.5;
+    if (isYT) ytPlayerRef.current?.setVolume?.(originalVolume * 50);
+    else if (audioRef.current) audioRef.current.volume = originalVolume * 0.5;
     spotAudio.src = pickRandomSpot();
     spotAudio.currentTime = 0;
     spotAudio.volume = Math.min(1, originalVolume + 0.2);
     spotAudio.play().catch((e) => console.warn("Spot bloccato:", e.message));
-    const restore = () => { musicAudio.volume = originalVolume; spotAudio.removeEventListener("ended", restore); };
+    const restore = () => {
+      if (isYT) ytPlayerRef.current?.setVolume?.(originalVolume * 100);
+      else if (audioRef.current) audioRef.current.volume = originalVolume;
+      spotAudio.removeEventListener("ended", restore);
+    };
     spotAudio.addEventListener("ended", restore);
   };
 
   const playSpotSolo = () => {
-    if (!adAudioRef.current || !audioRef.current) return;
-    const musicAudio = audioRef.current;
+    if (!adAudioRef.current) return;
     const spotAudio = adAudioRef.current;
-    musicAudio.pause();
+    const isYT = current && !current.isCustom;
+    if (isYT) ytPlayerRef.current?.pauseVideo?.();
+    else audioRef.current?.pause();
     spotAudio.src = pickRandomSpot();
     spotAudio.currentTime = 0;
     spotAudio.volume = Math.min(1, volume + 0.2);
     spotAudio.play().catch((e) => console.warn("Spot bloccato:", e.message));
-    const restore = () => { musicAudio.play().catch(() => {}); spotAudio.removeEventListener("ended", restore); };
+    const restore = () => {
+      if (isYT) ytPlayerRef.current?.playVideo?.();
+      else audioRef.current?.play().catch(() => {});
+      spotAudio.removeEventListener("ended", restore);
+    };
     spotAudio.addEventListener("ended", restore);
   };
 
@@ -371,15 +470,13 @@ export default function RadioPucciotto() {
         {/* Player */}
         <div className="player-card" style={{ background: WHITE, borderRadius: "20px", padding: "28px", border: "1px solid rgba(26,26,26,0.08)", boxShadow: "0 4px 20px rgba(0,0,0,.04)", display: "flex", flexDirection: "column", gap: "20px" }}>
           <div style={{ display: "flex", gap: "20px", alignItems: "center" }}>
-            <div style={{ width: 84, height: 84, borderRadius: "16px", background: `linear-gradient(135deg, ${current?.color || RED}, ${BLACK})`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+            <div style={{ width: 84, height: 84, borderRadius: "16px", overflow: "hidden", background: BLACK, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
               {current?.isCustom ? (
-                <Music size={32} color={WHITE} />
-              ) : (
-                <div style={{ display: "flex", gap: "4px", alignItems: "center", height: "30px" }}>
-                  {[0,1,2,3].map((i) => (
-                    <div key={i} style={{ width: "4px", height: "100%", borderRadius: "2px", background: WHITE, animation: isPlaying ? `pulse-bar ${0.6 + i*0.15}s ease-in-out infinite` : "none", transform: isPlaying ? undefined : "scaleY(0.3)" }} />
-                  ))}
+                <div style={{ width: "100%", height: "100%", borderRadius: "16px", background: `linear-gradient(135deg, ${current?.color || RED}, ${BLACK})`, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  <Music size={32} color={WHITE} />
                 </div>
+              ) : (
+                <div id="yt-player" />
               )}
             </div>
             <div style={{ flex: 1, minWidth: 0 }}>
@@ -396,9 +493,11 @@ export default function RadioPucciotto() {
           <div>
             <div style={{ height: "5px", borderRadius: "3px", background: "rgba(26,26,26,0.08)", overflow: "hidden", cursor: "pointer" }}
               onClick={(e) => {
-                if (!audioRef.current || !duration) return;
+                if (!duration) return;
                 const rect = e.currentTarget.getBoundingClientRect();
-                audioRef.current.currentTime = ((e.clientX - rect.left) / rect.width) * duration;
+                const t = ((e.clientX - rect.left) / rect.width) * duration;
+                if (current && !current.isCustom) ytPlayerRef.current?.seekTo?.(t, true);
+                else if (audioRef.current) audioRef.current.currentTime = t;
               }}>
               <div style={{ height: "100%", width: `${pct}%`, background: RED, transition: "width 0.2s linear" }} />
             </div>
