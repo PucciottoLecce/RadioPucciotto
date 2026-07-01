@@ -1,5 +1,7 @@
 import React, { useState, useRef, useEffect, useMemo } from "react";
 import { Play, Pause, SkipForward, SkipBack, Volume2, Trash2, Shuffle, Music } from "lucide-react";
+import { db } from "./firebase.js";
+import { ref, set, onValue } from "firebase/database";
 
 const RED   = "#c0392b";
 const WHITE = "#ffffff";
@@ -77,6 +79,9 @@ export default function RadioPucciotto() {
   const adAudioRef = useRef(null);
   const ytPlayerRef = useRef(null);
   const [ytReady, setYtReady] = useState(false);
+
+  // Determina modalità all'avvio: ?gestionale nell'URL = pannello admin
+  const isGestionale = window.location.search.includes("gestionale");
 
   // Lista base (jamendo + custom), mai shuffled
   const baseList = useMemo(() => [...tracks, ...customTracks], [tracks, customTracks]);
@@ -383,15 +388,38 @@ export default function RadioPucciotto() {
     }
   };
 
+  // Pubblica il brano corrente su Firebase (solo dal gestionale)
+  const publishNowPlaying = (track) => {
+    if (!track || !isGestionale) return;
+    set(ref(db, "nowPlaying"), {
+      videoId: track.videoId || null,
+      url: track.url || null,
+      title: track.title,
+      artist: track.artist,
+      category: track.category,
+      color: track.color,
+      isCustom: track.isCustom || false,
+      startedAt: Date.now(),
+    }).catch((e) => console.warn("Firebase write error:", e));
+  };
+
   const goNext = () => {
     setPlaysUntilAd((p) => { if (p <= 1) { playSpotSolo(); return 3; } return p - 1; });
-    setCurrentIndex((i) => (i + 1) % filtered.length);
+    setCurrentIndex((i) => {
+      const next = (i + 1) % filtered.length;
+      publishNowPlaying(filtered[next]);
+      return next;
+    });
     setProgress(0);
     setIsPlaying(true);
   };
 
   const goPrev = () => {
-    setCurrentIndex((i) => (i - 1 + filtered.length) % filtered.length);
+    setCurrentIndex((i) => {
+      const prev = (i - 1 + filtered.length) % filtered.length;
+      publishNowPlaying(filtered[prev]);
+      return prev;
+    });
     setProgress(0);
     setIsPlaying(true);
   };
@@ -441,6 +469,36 @@ export default function RadioPucciotto() {
     spotAudio.addEventListener("ended", restore);
   };
 
+  // Gestionale: pubblica su Firebase ogni volta che current cambia (incluso click su brano dalla lista)
+  useEffect(() => {
+    if (isGestionale && current && isPlaying) {
+      publishNowPlaying(current);
+    }
+  }, [current?.id]);
+
+  // Vista radio: ascolta Firebase in tempo reale e si sincronizza
+  const [radioTrack, setRadioTrack] = useState(null);
+  useEffect(() => {
+    if (isGestionale) return;
+    const nowPlayingRef = ref(db, "nowPlaying");
+    const unsub = onValue(nowPlayingRef, (snapshot) => {
+      const data = snapshot.val();
+      if (!data) return;
+      setRadioTrack(data);
+      // Sincronizzazione: calcola la posizione attuale nel brano
+      const elapsed = (Date.now() - data.startedAt) / 1000;
+      if (ytPlayerRef.current && ytReady && data.videoId) {
+        if (data.videoId !== ytPlayerRef.current.getVideoData?.()?.video_id) {
+          ytPlayerRef.current.loadVideoById({ videoId: data.videoId, startSeconds: elapsed });
+        } else {
+          ytPlayerRef.current.seekTo(elapsed, true);
+          ytPlayerRef.current.playVideo();
+        }
+      }
+    });
+    return () => unsub();
+  }, [ytReady, isGestionale]);
+
   const formatTime = (s) => {
     if (!s || isNaN(s)) return "0:00";
     const m = Math.floor(s / 60);
@@ -449,7 +507,6 @@ export default function RadioPucciotto() {
   };
 
   const pct = duration ? (progress / duration) * 100 : 0;
-  const isGestionale = window.location.search.includes("gestionale");
 
   // ─── VISTA RADIO PUBBLICA ────────────────────────────────────────────────
   if (!isGestionale) return (
