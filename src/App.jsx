@@ -449,8 +449,97 @@ export default function RadioPucciotto() {
   };
 
   const pct = duration ? (progress / duration) * 100 : 0;
+  const isGestionale = window.location.search.includes("gestionale");
 
-  return (
+  // ─── VISTA RADIO PUBBLICA ────────────────────────────────────────────────
+  if (!isGestionale) return (
+    <div style={{ minHeight: "100vh", background: BLACK, fontFamily: "'DM Sans', sans-serif", color: WHITE, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "space-between" }}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Lobster&family=DM+Sans:wght@400;600;700&display=swap');
+        * { box-sizing: border-box; }
+        @keyframes pulse { 0%,100% { opacity: 0.4; transform: scaleY(0.4); } 50% { opacity: 1; transform: scaleY(1); } }
+        @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+      `}</style>
+
+      {/* Header */}
+      <header style={{ width: "100%", padding: "20px 28px", display: "flex", alignItems: "center", justifyContent: "space-between", borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
+        <div style={{ fontFamily: "'Lobster', cursive", fontSize: "26px", color: RED }}>Radio Pucciotto</div>
+        <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+          <div style={{ width: 8, height: 8, borderRadius: "50%", background: isPlaying ? "#27ae60" : "#888", boxShadow: isPlaying ? "0 0 6px #27ae60" : "none" }} />
+          <span style={{ fontSize: "12px", color: "#888", letterSpacing: "1px" }}>LIVE</span>
+        </div>
+      </header>
+
+      {/* Corpo centrale */}
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "36px", padding: "40px 28px", width: "100%", maxWidth: "480px" }}>
+
+        {/* Player YT + equalizzatore */}
+        <div style={{ position: "relative", width: 180, height: 180 }}>
+          <div style={{ width: 180, height: 180, borderRadius: "50%", background: `radial-gradient(circle, ${current?.color || RED}33, ${BLACK})`, border: `3px solid ${current?.color || RED}55`, display: "flex", alignItems: "center", justifyContent: "center", animation: isPlaying ? "spin 12s linear infinite" : "none" }}>
+            <div style={{ width: 60, height: 60, borderRadius: "50%", background: BLACK, display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <div id="yt-player" style={{ width: 1, height: 1, overflow: "hidden", opacity: 0, position: "absolute" }} />
+              {/* equalizzatore visivo */}
+              <div style={{ display: "flex", gap: "4px", alignItems: "center", height: "24px" }}>
+                {[0,1,2,3,4].map((i) => (
+                  <div key={i} style={{ width: "3px", height: "100%", borderRadius: "2px", background: WHITE, animation: isPlaying ? `pulse ${0.5 + i * 0.12}s ease-in-out infinite` : "none", transform: isPlaying ? undefined : "scaleY(0.2)", opacity: isPlaying ? 1 : 0.3 }} />
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Info brano */}
+        <div style={{ textAlign: "center" }}>
+          <div style={{ fontSize: "11px", color: current?.color || RED, letterSpacing: "2px", fontWeight: 700, marginBottom: "10px", textTransform: "uppercase" }}>{current?.category || "—"}</div>
+          <div style={{ fontSize: "22px", fontWeight: 700, lineHeight: 1.2, marginBottom: "8px" }}>{current?.title || "Caricamento..."}</div>
+          <div style={{ fontSize: "15px", color: "#aaa" }}>{current?.artist || ""}</div>
+        </div>
+
+        {/* Barra avanzamento */}
+        <div style={{ width: "100%", display: "flex", flexDirection: "column", gap: "6px" }}>
+          <div style={{ height: "3px", borderRadius: "2px", background: "rgba(255,255,255,0.1)", overflow: "hidden" }}>
+            <div style={{ height: "100%", width: `${pct}%`, background: current?.color || RED, transition: "width 0.5s linear" }} />
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: "11px", color: "#555" }}>
+            <span>{formatTime(progress)}</span>
+            <span>{formatTime(duration)}</span>
+          </div>
+        </div>
+
+        {/* Controlli */}
+        <div style={{ display: "flex", alignItems: "center", gap: "32px" }}>
+          <button className="pc-btn" onClick={goPrev} style={{ background: "none", border: "none", cursor: "pointer", color: "#888" }}><SkipBack size={28} /></button>
+          <button onClick={() => setIsPlaying((p) => !p)} style={{ width: 64, height: 64, borderRadius: "50%", background: RED, border: "none", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: `0 0 20px ${RED}55` }}>
+            {isPlaying ? <Pause size={28} color={WHITE} fill={WHITE} /> : <Play size={28} color={WHITE} fill={WHITE} />}
+          </button>
+          <button className="pc-btn" onClick={goNext} style={{ background: "none", border: "none", cursor: "pointer", color: "#888" }}><SkipForward size={28} /></button>
+        </div>
+
+        {/* Volume */}
+        <div style={{ display: "flex", alignItems: "center", gap: "10px", width: "100%" }}>
+          <Volume2 size={16} color="#555" />
+          <input type="range" min="0" max="1" step="0.01" value={volume} onChange={(e) => setVolume(parseFloat(e.target.value))}
+            style={{ flex: 1, accentColor: RED }} />
+        </div>
+      </div>
+
+      {/* Banner sponsor */}
+      <div style={{ width: "100%", background: "rgba(192,57,43,0.15)", borderTop: "1px solid rgba(192,57,43,0.2)", padding: "10px 28px", display: "flex", alignItems: "center", gap: "10px" }}>
+        <span style={{ background: RED, color: WHITE, padding: "2px 8px", borderRadius: "5px", fontSize: "10px", fontWeight: 700, letterSpacing: "1px", flexShrink: 0 }}>SPONSOR</span>
+        <span key={adLine} style={{ fontSize: "13px", color: "#aaa" }}>{AD_LINES[adLine]}</span>
+      </div>
+
+      {/* Footer */}
+      <footer style={{ width: "100%", padding: "12px 28px", textAlign: "center", fontSize: "10px", color: "#444" }}>
+        Radio Pucciotto — musica © dei rispettivi titolari, via YouTube
+      </footer>
+
+      <audio ref={audioRef} onTimeUpdate={handleTimeUpdate} onEnded={goNext} onError={() => setStatus("Errore")}
+        onCanPlay={() => { if (shouldPlayRef.current) audioRef.current?.play().catch(() => {}); }} />
+      <audio ref={adAudioRef} />
+    </div>
+  );
+  // ─── FINE VISTA RADIO PUBBLICA ───────────────────────────────────────────
     <div style={{ minHeight: "100vh", background: CREAM, fontFamily: "'DM Sans', sans-serif", color: BLACK, display: "flex", flexDirection: "column" }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Lobster&family=DM+Sans:wght@400;600;700&display=swap');
