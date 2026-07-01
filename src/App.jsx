@@ -83,6 +83,10 @@ export default function RadioPucciotto() {
   // Traccia trasmessa dal gestionale via Firebase — è la fonte di verità per la vista pubblica
   const [radioTrack, setRadioTrack] = useState(null);
 
+  // Spot pubblicitario in onda in questo momento, sincronizzato via Firebase (vista pubblica)
+  const [adTrack, setAdTrack] = useState(null);
+  const wasPlayingBeforeAdRef = useRef(false);
+
   // Determina modalità all'avvio: ?gestionale nell'URL = pannello admin
   const isGestionale = window.location.search.includes("gestionale");
 
@@ -289,10 +293,16 @@ export default function RadioPucciotto() {
 
   useEffect(() => { setCurrentIndex(0); }, [category]);
 
+  // Il gestionale è l'unico che decide QUANDO parte uno spot in sottofondo (ogni 2 minuti
+  // di trasmissione) e lo pubblica su Firebase tramite publishAdPlaying (dentro
+  // playSpotInBackground), così tutti gli ascoltatori lo sentono nello stesso istante.
+  // In vista pubblica questo intervallo NON esiste: gli ascoltatori reagiscono solo
+  // all'evento "adPlaying" da Firebase (vedi l'effetto più sotto che ascolta adTrack).
   useEffect(() => {
+    if (!isGestionale) return;
     const id = setInterval(() => { if (isPlaying) playSpotInBackground(); }, 120000);
     return () => clearInterval(id);
-  }, [isPlaying, volume]);
+  }, [isPlaying, volume, isGestionale]);
 
   useEffect(() => {
     const id = setInterval(() => setAdLine((a) => (a + 1) % AD_LINES.length), 6000);
@@ -426,6 +436,15 @@ export default function RadioPucciotto() {
     }).catch((e) => console.warn("Firebase write error:", e));
   };
 
+  // Pubblica su Firebase quale spot sta partendo (solo dal gestionale), così tutti gli
+  // ascoltatori lo sentono nello stesso istante. Passare null segnala la fine dello spot,
+  // così la vista pubblica sa quando riprendere la musica normale.
+  const publishAdPlaying = (spotUrl) => {
+    if (!isGestionale) return;
+    set(ref(db, "adPlaying"), spotUrl ? { url: spotUrl, startedAt: Date.now() } : null)
+      .catch((e) => console.warn("Firebase write error (adPlaying):", e));
+  };
+
   const goNext = () => {
     setPlaysUntilAd((p) => { if (p <= 1) { playSpotSolo(); return 3; } return p - 1; });
     setCurrentIndex((i) => {
@@ -460,15 +479,18 @@ export default function RadioPucciotto() {
     const spotAudio = adAudioRef.current;
     const isYT = current && !current.isCustom;
     const originalVolume = volume;
+    const spotUrl = pickRandomSpot();
     if (isYT) ytPlayerRef.current?.setVolume?.(originalVolume * 50);
     else if (audioRef.current) audioRef.current.volume = originalVolume * 0.5;
-    spotAudio.src = pickRandomSpot();
+    spotAudio.src = spotUrl;
     spotAudio.currentTime = 0;
     spotAudio.volume = Math.min(1, originalVolume + 0.2);
     spotAudio.play().catch((e) => console.warn("Spot bloccato:", e.message));
+    publishAdPlaying(spotUrl);
     const restore = () => {
       if (isYT) ytPlayerRef.current?.setVolume?.(originalVolume * 100);
       else if (audioRef.current) audioRef.current.volume = originalVolume;
+      publishAdPlaying(null);
       spotAudio.removeEventListener("ended", restore);
     };
     spotAudio.addEventListener("ended", restore);
@@ -478,15 +500,18 @@ export default function RadioPucciotto() {
     if (!adAudioRef.current) return;
     const spotAudio = adAudioRef.current;
     const isYT = current && !current.isCustom;
+    const spotUrl = pickRandomSpot();
     if (isYT) ytPlayerRef.current?.pauseVideo?.();
     else audioRef.current?.pause();
-    spotAudio.src = pickRandomSpot();
+    spotAudio.src = spotUrl;
     spotAudio.currentTime = 0;
     spotAudio.volume = Math.min(1, volume + 0.2);
     spotAudio.play().catch((e) => console.warn("Spot bloccato:", e.message));
+    publishAdPlaying(spotUrl);
     const restore = () => {
       if (isYT) ytPlayerRef.current?.playVideo?.();
       else audioRef.current?.play().catch(() => {});
+      publishAdPlaying(null);
       spotAudio.removeEventListener("ended", restore);
     };
     spotAudio.addEventListener("ended", restore);
@@ -513,6 +538,47 @@ export default function RadioPucciotto() {
     });
     return () => unsub();
   }, [isGestionale]);
+
+  // Vista radio pubblica: ascolta lo spot in onda pubblicato dal gestionale via Firebase
+  useEffect(() => {
+    if (isGestionale) return;
+    const adPlayingRef = ref(db, "adPlaying");
+    const unsub = onValue(adPlayingRef, (snapshot) => {
+      setAdTrack(snapshot.val());
+    });
+    return () => unsub();
+  }, [isGestionale]);
+
+  // Vista radio pubblica: quando arriva/finisce uno spot, abbassa/ripristina il volume
+  // della canzone in corso e riproduce/interrompe lo spot in sincrono col gestionale
+  useEffect(() => {
+    if (isGestionale || !adAudioRef.current) return;
+    const spotAudio = adAudioRef.current;
+    const isYT = radioTrack && !radioTrack.isCustom;
+
+    if (adTrack?.url) {
+      wasPlayingBeforeAdRef.current = isPlaying;
+      if (isYT) ytPlayerRef.current?.setVolume?.(volume * 50);
+      else if (audioRef.current) audioRef.current.volume = volume * 0.5;
+
+      const elapsed = Math.max(0, (Date.now() - (adTrack.startedAt || Date.now())) / 1000);
+      if (spotAudio.src !== new URL(adTrack.url, window.location.href).href) {
+        spotAudio.src = adTrack.url;
+        spotAudio.load();
+      }
+      const startSpot = () => {
+        if (elapsed < (spotAudio.duration || Infinity)) spotAudio.currentTime = elapsed;
+        spotAudio.volume = Math.min(1, volume + 0.2);
+        spotAudio.play().catch((e) => console.warn("Spot bloccato:", e.message));
+      };
+      if (spotAudio.readyState >= 1) startSpot();
+      else spotAudio.addEventListener("loadedmetadata", startSpot, { once: true });
+    } else {
+      spotAudio.pause();
+      if (isYT) ytPlayerRef.current?.setVolume?.(volume * 100);
+      else if (audioRef.current) audioRef.current.volume = volume;
+    }
+  }, [adTrack, isGestionale]);
 
   // Vista radio pubblica: quando arriva/cambia radioTrack, carica il brano giusto
   // (YouTube o file custom) e si posiziona nel punto esatto di trasmissione, sincronizzato.
@@ -632,6 +698,7 @@ export default function RadioPucciotto() {
           <button
             onClick={() => setIsPlaying((p) => !p)}
             disabled={!isLive}
+            aria-label={isPlaying ? "Pausa" : "Play"}
             style={{ width: 64, height: 64, borderRadius: "50%", background: isLive ? RED : "#444", border: "none", cursor: isLive ? "pointer" : "not-allowed", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: isLive ? `0 0 20px ${RED}55` : "none" }}>
             {isPlaying ? <Pause size={28} color={WHITE} fill={WHITE} /> : <Play size={28} color={WHITE} fill={WHITE} />}
           </button>
@@ -641,6 +708,7 @@ export default function RadioPucciotto() {
         <div style={{ display: "flex", alignItems: "center", gap: "10px", width: "100%" }}>
           <Volume2 size={16} color="#555" />
           <input type="range" min="0" max="1" step="0.01" value={volume} onChange={(e) => setVolume(parseFloat(e.target.value))}
+            aria-label="Volume"
             style={{ flex: 1, accentColor: RED }} />
         </div>
       </div>
