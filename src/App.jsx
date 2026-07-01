@@ -220,12 +220,19 @@ export default function RadioPucciotto() {
       .then((arrays) => {
         const mapped = arrays.flat();
         if (!mapped.length) throw new Error("Nessun brano trovato");
+        // Rimuove duplicati per videoId (stesso video in più generi o ricerche)
+        const seen = new Set();
+        const deduped = mapped.filter((t) => {
+          if (seen.has(t.videoId)) return false;
+          seen.add(t.videoId);
+          return true;
+        });
         const label = isTrending ? "🔥 Più ascoltati del momento" : "🏆 Più ascoltati di sempre";
         // Salva in cache
         try {
-          localStorage.setItem(CACHE_KEY, JSON.stringify({ tracks: mapped, label, ts: Date.now() }));
+          localStorage.setItem(CACHE_KEY, JSON.stringify({ tracks: deduped, label, ts: Date.now() }));
         } catch (_) { /* quota localStorage piena, ignora */ }
-        setTracks(mapped);
+        setTracks(deduped);
         setLoadError(label);
         setLoadingTracks(false);
       })
