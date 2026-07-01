@@ -86,6 +86,10 @@ export default function RadioPucciotto() {
   // Spot pubblicitario in onda in questo momento, sincronizzato via Firebase (vista pubblica)
   const [adTrack, setAdTrack] = useState(null);
   const wasPlayingBeforeAdRef = useRef(false);
+  // Tiene traccia dell'ultimo brano già caricato/posizionato nella vista pubblica,
+  // per non ricaricare/riavviare il player quando l'effetto rigira solo per un
+  // cambio di isPlaying (evita i conflitti di riproduzione visti all'avvio)
+  const lastPublicTrackKeyRef = useRef(null);
 
   // Determina modalità all'avvio: ?gestionale nell'URL = pannello admin
   const isGestionale = window.location.search.includes("gestionale");
@@ -266,8 +270,8 @@ export default function RadioPucciotto() {
           onReady: () => { ytPlayerRef.current.setVolume(volume * 100); setYtReady(true); },
           onStateChange: (e) => {
             if (e.data === window.YT.PlayerState.ENDED) goNext();
-            if (e.data === window.YT.PlayerState.PLAYING) setStatus("In riproduzione");
-            if (e.data === window.YT.PlayerState.PAUSED) setStatus("In pausa");
+            if (e.data === window.YT.PlayerState.PLAYING) { setStatus("In riproduzione"); setIsPlaying(true); }
+            if (e.data === window.YT.PlayerState.PAUSED) { setStatus("In pausa"); setIsPlaying(false); }
           },
         },
       });
@@ -375,19 +379,10 @@ export default function RadioPucciotto() {
     }
   }, [current?.id, ytReady, isGestionale]);
 
-  // Vista pubblica: Play/Pausa dell'ascolto locale, pilotato da radioTrack (non da `current`)
-  useEffect(() => {
-    if (isGestionale || !radioTrack) return;
-    if (radioTrack.isCustom) {
-      if (!audioRef.current) return;
-      if (isPlaying) audioRef.current.play().catch(() => {});
-      else audioRef.current.pause();
-    } else {
-      if (!ytReady || !ytPlayerRef.current) return;
-      if (isPlaying) ytPlayerRef.current.playVideo();
-      else ytPlayerRef.current.pauseVideo();
-    }
-  }, [isPlaying, ytReady, isGestionale, radioTrack]);
+  // NOTA: il play/pausa della vista pubblica è gestito in un UNICO effetto più sotto,
+  // insieme al caricamento del brano trasmesso (radioTrack), per evitare che due effetti
+  // separati si contendano il controllo dello stesso <audio>/player YouTube (causa dei
+  // conflitti/sovrapposizioni che a volte si vedevano all'avvio).
 
   // Polling per aggiornare avanzamento/durata del player YouTube.
   // Gestionale: segue `current`. Vista pubblica: segue radioTrack (il brano trasmesso).
@@ -582,38 +577,59 @@ export default function RadioPucciotto() {
 
   // Vista radio pubblica: quando arriva/cambia radioTrack, carica il brano giusto
   // (YouTube o file custom) e si posiziona nel punto esatto di trasmissione, sincronizzato.
+  // Gestisce ANCHE il play/pausa locale (isPlaying), tutto in un unico effetto, così non
+  // ci sono più due effetti separati che si contendono il controllo dello stesso player
+  // (era questa la causa dei conflitti/sovrapposizioni a volte visti all'avvio).
   useEffect(() => {
     if (isGestionale || !radioTrack) return;
 
-    if (radioTrack.isCustom && radioTrack.url) {
-      // Brano "Le mie canzoni": file audio diretto
+    const isCustom = radioTrack.isCustom && radioTrack.url;
+    const trackKey = isCustom ? radioTrack.url : radioTrack.videoId;
+    const isNewTrack = lastPublicTrackKeyRef.current !== trackKey;
+
+    if (isCustom) {
       ytPlayerRef.current?.pauseVideo?.();
-      if (audioRef.current && audioRef.current.src !== new URL(radioTrack.url, window.location.href).href) {
+      if (!audioRef.current) return;
+
+      if (isNewTrack) {
+        lastPublicTrackKeyRef.current = trackKey;
         audioRef.current.src = radioTrack.url;
         audioRef.current.load();
-      }
-      const elapsed = (Date.now() - radioTrack.startedAt) / 1000;
-      const startPlayback = () => {
-        if (!audioRef.current) return;
-        if (elapsed >= 0 && elapsed < (audioRef.current.duration || Infinity)) {
-          audioRef.current.currentTime = elapsed;
-        }
-        audioRef.current.play().then(() => setIsPlaying(true)).catch(() => {});
-      };
-      if (audioRef.current?.readyState >= 1) startPlayback();
-      else audioRef.current?.addEventListener("loadedmetadata", startPlayback, { once: true });
-    } else if (radioTrack.videoId && ytReady && ytPlayerRef.current) {
-      const elapsed = Math.max(0, (Date.now() - radioTrack.startedAt) / 1000);
-      const currentVideoId = ytPlayerRef.current.getVideoData?.()?.video_id;
-      if (radioTrack.videoId !== currentVideoId) {
-        ytPlayerRef.current.loadVideoById({ videoId: radioTrack.videoId, startSeconds: elapsed });
+        const elapsed = (Date.now() - radioTrack.startedAt) / 1000;
+        const startPlayback = () => {
+          if (!audioRef.current) return;
+          if (elapsed >= 0 && elapsed < (audioRef.current.duration || Infinity)) {
+            audioRef.current.currentTime = elapsed;
+          }
+          // Al primo arrivo del brano tentiamo sempre l'autoplay (comportamento da "radio
+          // live"); se il browser lo blocca perché manca un'interazione utente, isPlaying
+          // resta false e l'utente vedrà il tasto Play pronto per partire manualmente.
+          audioRef.current.play()
+            .then(() => { setIsPlaying(true); setStatus("In riproduzione"); })
+            .catch(() => {});
+        };
+        audioRef.current.addEventListener("loadedmetadata", startPlayback, { once: true });
       } else {
-        ytPlayerRef.current.seekTo(elapsed, true);
-        ytPlayerRef.current.playVideo();
+        // Stesso brano: applica solo lo stato play/pausa richiesto dall'utente
+        if (isPlaying) audioRef.current.play().catch(() => {});
+        else audioRef.current.pause();
       }
-      setIsPlaying(true);
+    } else if (radioTrack.videoId && ytReady && ytPlayerRef.current) {
+      if (audioRef.current) audioRef.current.pause();
+      if (isNewTrack) {
+        lastPublicTrackKeyRef.current = trackKey;
+        const elapsed = Math.max(0, (Date.now() - radioTrack.startedAt) / 1000);
+        ytPlayerRef.current.loadVideoById({ videoId: radioTrack.videoId, startSeconds: elapsed });
+        // loadVideoById avvia sempre la riproduzione; se il browser blocca l'autoplay
+        // (mancanza di interazione utente), onStateChange non passerà mai a PLAYING e
+        // isPlaying resterà false: l'utente vedrà comunque il tasto Play pronto.
+      } else {
+        if (isPlaying) ytPlayerRef.current.playVideo();
+        else ytPlayerRef.current.pauseVideo();
+      }
     }
-  }, [radioTrack, ytReady, isGestionale]);
+  }, [radioTrack, isPlaying, ytReady, isGestionale]);
+
 
   const formatTime = (s) => {
     if (!s || isNaN(s)) return "0:00";
