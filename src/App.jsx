@@ -369,6 +369,30 @@ export default function RadioPucciotto() {
 
   // Ref che tiene traccia se vogliamo riprodurre appena il brano è pronto
   const shouldPlayRef = useRef(false);
+  // Traccia l'eventuale Promise di play() ancora "in volo" sul tag <audio> dei brani
+  // locali/custom. Chiamare pause() (o cambiare src) mentre quella promise non si è
+  // ancora risolta è una nota causa di comportamento imprevedibile nei browser: a
+  // volte la pausa viene ignorata e l'audio riparte da solo appena la vecchia play()
+  // si risolve. Era proprio questo a rendere "incontrollabile" il player dopo uno
+  // skip sui brani locali (index.json). Queste due funzioni aspettano sempre che una
+  // play() pendente si concluda prima di eseguire la prossima operazione.
+  const playPromiseRef = useRef(null);
+  const safePlayAudio = (audio) => {
+    const p = audio.play();
+    playPromiseRef.current = p;
+    if (p && p.then) {
+      const clear = () => { if (playPromiseRef.current === p) playPromiseRef.current = null; };
+      p.then(clear).catch(clear);
+    }
+    return p;
+  };
+  const safePauseAudio = (audio) => {
+    if (playPromiseRef.current) {
+      playPromiseRef.current.then(() => audio.pause()).catch(() => audio.pause());
+    } else {
+      audio.pause();
+    }
+  };
 
   // Quando cambia il volume
   useEffect(() => {
@@ -396,14 +420,14 @@ export default function RadioPucciotto() {
     if (!audioRef.current) return;
     if (isPlaying) {
       shouldPlayRef.current = true;
-      const p = audioRef.current.play();
+      const p = safePlayAudio(audioRef.current);
       if (p && p.then) {
         p.then(() => setStatus("In riproduzione"))
          .catch(() => {}); // onCanPlay gestirà il play se il file non è ancora pronto
       }
     } else {
       shouldPlayRef.current = false;
-      audioRef.current.pause();
+      safePauseAudio(audioRef.current);
       setStatus("In pausa");
     }
   }, [isPlaying, ytReady, isGestionale]);
@@ -421,6 +445,11 @@ export default function RadioPucciotto() {
       // Brani caricati dall'utente: restano riprodotti via tag <audio>
       ytPlayerRef.current?.pauseVideo?.();
       if (audioRef.current) {
+        // Interrompiamo in modo sicuro un'eventuale play() del brano precedente
+        // ancora "in volo" PRIMA di cambiare sorgente: cambiare src/chiamare load()
+        // mentre quella promise è ancora pendente è la causa dei blocchi e delle
+        // "ripartenze fantasma" viste dopo uno skip sui brani locali.
+        safePauseAudio(audioRef.current);
         audioRef.current.src = current.url;
         audioRef.current.load();
       }
@@ -653,6 +682,7 @@ export default function RadioPucciotto() {
 
       if (isNewTrack) {
         lastPublicTrackKeyRef.current = trackKey;
+        safePauseAudio(audioRef.current);
         audioRef.current.src = radioTrack.url;
         audioRef.current.load();
         const elapsed = (Date.now() - radioTrack.startedAt) / 1000;
@@ -664,15 +694,15 @@ export default function RadioPucciotto() {
           // Al primo arrivo del brano tentiamo sempre l'autoplay (comportamento da "radio
           // live"); se il browser lo blocca perché manca un'interazione utente, isPlaying
           // resta false e l'utente vedrà il tasto Play pronto per partire manualmente.
-          audioRef.current.play()
+          safePlayAudio(audioRef.current)
             .then(() => { setIsPlaying(true); setStatus("In riproduzione"); })
             .catch(() => {});
         };
         audioRef.current.addEventListener("loadedmetadata", startPlayback, { once: true });
       } else {
         // Stesso brano: applica solo lo stato play/pausa richiesto dall'utente
-        if (isPlaying) audioRef.current.play().catch(() => {});
-        else audioRef.current.pause();
+        if (isPlaying) safePlayAudio(audioRef.current).catch(() => {});
+        else safePauseAudio(audioRef.current);
       }
     } else if (radioTrack.videoId && ytReady && ytPlayerRef.current) {
       if (audioRef.current) audioRef.current.pause();
@@ -1004,8 +1034,8 @@ export default function RadioPucciotto() {
           <audio ref={audioRef} onTimeUpdate={handleTimeUpdate} onEnded={goNext}
             onError={() => setStatus("Errore nel caricamento del brano")}
             onCanPlay={() => {
-              if (shouldPlayRef.current) {
-                audioRef.current?.play()
+              if (shouldPlayRef.current && audioRef.current) {
+                safePlayAudio(audioRef.current)
                   .then(() => setStatus("In riproduzione"))
                   .catch((e) => setStatus("Errore: " + e.message));
               } else {
