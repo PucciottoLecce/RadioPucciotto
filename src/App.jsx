@@ -617,7 +617,12 @@ export default function RadioPucciotto() {
         spotAudio.load();
       }
       const startSpot = () => {
-        if (elapsed < (spotAudio.duration || Infinity)) spotAudio.currentTime = elapsed;
+        // Il "recupero" del tempo trascorso (per sincronizzarsi con chi si collega a
+        // spot già iniziato) si applica solo oltre una soglia minima: il normale
+        // ritardo di rete/caricamento (qualche centinaio di ms, anche 1s) NON deve far
+        // saltare in avanti l'audio, altrimenti si perdono le prime parole dello spot.
+        const SYNC_THRESHOLD = 1.5; // secondi
+        spotAudio.currentTime = (elapsed > SYNC_THRESHOLD && elapsed < (spotAudio.duration || Infinity)) ? elapsed : 0;
         spotAudio.volume = Math.min(1, volume + 0.2);
         spotAudio.play().catch((e) => console.warn("Spot bloccato:", e.message));
       };
