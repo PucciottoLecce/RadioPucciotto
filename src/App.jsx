@@ -90,6 +90,11 @@ export default function RadioPucciotto() {
   // per non ricaricare/riavviare il player quando l'effetto rigira solo per un
   // cambio di isPlaying (evita i conflitti di riproduzione visti all'avvio)
   const lastPublicTrackKeyRef = useRef(null);
+  // I browser (Safari in particolare) bloccano l'autoplay di un <audio> finché non è
+  // stato "sbloccato" da un'interazione utente diretta su QUELL'elemento. Il tag della
+  // musica si sblocca quando l'utente preme Play, ma quello degli spot resta bloccato
+  // e finora impediva di sentire gli spot arrivati via Firebase. Lo sblocchiamo insieme.
+  const adAudioUnlockedRef = useRef(false);
 
   // Determina modalità all'avvio: ?gestionale nell'URL = pannello admin
   const isGestionale = window.location.search.includes("gestionale");
@@ -269,7 +274,10 @@ export default function RadioPucciotto() {
         events: {
           onReady: () => { ytPlayerRef.current.setVolume(volume * 100); setYtReady(true); },
           onStateChange: (e) => {
-            if (e.data === window.YT.PlayerState.ENDED) goNext();
+            // goNext() gestisce anche la logica dello spot pubblicitario locale (playSpotSolo):
+            // deve girare SOLO nel gestionale, altrimenti in vista pubblica un video che finisce
+            // può far scattare uno spot non sincronizzato e bloccare/disallineare il video.
+            if (e.data === window.YT.PlayerState.ENDED && isGestionale) goNext();
             if (e.data === window.YT.PlayerState.PLAYING) { setStatus("In riproduzione"); setIsPlaying(true); }
             if (e.data === window.YT.PlayerState.PAUSED) { setStatus("In pausa"); setIsPlaying(false); }
           },
@@ -616,16 +624,21 @@ export default function RadioPucciotto() {
       }
     } else if (radioTrack.videoId && ytReady && ytPlayerRef.current) {
       if (audioRef.current) audioRef.current.pause();
+      const elapsed = Math.max(0, (Date.now() - radioTrack.startedAt) / 1000);
       if (isNewTrack) {
         lastPublicTrackKeyRef.current = trackKey;
-        const elapsed = Math.max(0, (Date.now() - radioTrack.startedAt) / 1000);
         ytPlayerRef.current.loadVideoById({ videoId: radioTrack.videoId, startSeconds: elapsed });
         // loadVideoById avvia sempre la riproduzione; se il browser blocca l'autoplay
         // (mancanza di interazione utente), onStateChange non passerà mai a PLAYING e
         // isPlaying resterà false: l'utente vedrà comunque il tasto Play pronto.
+      } else if (isPlaying) {
+        // Ogni volta che l'utente (ri)avvia manualmente l'ascolto ci risincronizziamo
+        // SEMPRE al punto esatto in cui si trova la diretta in questo istante — non a
+        // dove il video si era fermato — così non parte più "da un punto diverso".
+        ytPlayerRef.current.seekTo(elapsed, true);
+        ytPlayerRef.current.playVideo();
       } else {
-        if (isPlaying) ytPlayerRef.current.playVideo();
-        else ytPlayerRef.current.pauseVideo();
+        ytPlayerRef.current.pauseVideo();
       }
     }
   }, [radioTrack, isPlaying, ytReady, isGestionale]);
@@ -656,7 +669,12 @@ export default function RadioPucciotto() {
 
       {/* Header */}
       <header style={{ width: "100%", padding: "20px 28px", display: "flex", alignItems: "center", justifyContent: "space-between", borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
-        <div style={{ fontFamily: "'Lobster', cursive", fontSize: "26px", color: RED }}>Radio Pucciotto</div>
+        <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+          <div style={{ width: 44, height: 44, borderRadius: "50%", background: WHITE, border: `2px solid ${WHITE}`, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
+            <img src="/logo.png" alt="Pucciotto" style={{ width: "100%", height: "100%", objectFit: "contain" }} />
+          </div>
+          <div style={{ fontFamily: "'Lobster', cursive", fontSize: "26px", color: RED }}>Radio Pucciotto</div>
+        </div>
         <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
           <div style={{ width: 8, height: 8, borderRadius: "50%", background: isLive ? "#27ae60" : "#888", boxShadow: isLive ? "0 0 6px #27ae60" : "none" }} />
           <span style={{ fontSize: "12px", color: "#888", letterSpacing: "1px" }}>{isLive ? "LIVE" : "OFFLINE"}</span>
@@ -712,7 +730,19 @@ export default function RadioPucciotto() {
         {/* Controlli: nella radio pubblica solo Play/Pausa dell'ascolto locale, niente skip */}
         <div style={{ display: "flex", alignItems: "center", gap: "32px" }}>
           <button
-            onClick={() => setIsPlaying((p) => !p)}
+            onClick={() => {
+              // Sblocca l'<audio> degli spot alla prima interazione dell'utente, così
+              // quando arriva un evento "adPlaying" da Firebase il browser lo lascia partire
+              if (!adAudioUnlockedRef.current && adAudioRef.current) {
+                adAudioUnlockedRef.current = true;
+                const a = adAudioRef.current;
+                const wasMuted = a.muted;
+                a.muted = true;
+                a.play().then(() => { a.pause(); a.currentTime = 0; a.muted = wasMuted; })
+                  .catch(() => { a.muted = wasMuted; });
+              }
+              setIsPlaying((p) => !p);
+            }}
             disabled={!isLive}
             aria-label={isPlaying ? "Pausa" : "Play"}
             style={{ width: 64, height: 64, borderRadius: "50%", background: isLive ? RED : "#444", border: "none", cursor: isLive ? "pointer" : "not-allowed", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: isLive ? `0 0 20px ${RED}55` : "none" }}>
