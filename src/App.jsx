@@ -80,6 +80,9 @@ export default function RadioPucciotto() {
   const ytPlayerRef = useRef(null);
   const [ytReady, setYtReady] = useState(false);
 
+  // Traccia trasmessa dal gestionale via Firebase — è la fonte di verità per la vista pubblica
+  const [radioTrack, setRadioTrack] = useState(null);
+
   // Determina modalità all'avvio: ?gestionale nell'URL = pannello admin
   const isGestionale = window.location.search.includes("gestionale");
 
@@ -305,8 +308,10 @@ export default function RadioPucciotto() {
     ytPlayerRef.current?.setVolume?.(volume * 100);
   }, [volume]);
 
-  // Quando cambia isPlaying (senza cambiare brano)
+  // Quando cambia isPlaying (senza cambiare brano) — SOLO gestionale: qui `current` è la
+  // playlist locale che l'admin sta effettivamente pilotando per la trasmissione.
   useEffect(() => {
+    if (!isGestionale) return;
     const isYT = current && !current.isCustom;
     if (isYT) {
       if (!ytReady || !ytPlayerRef.current) return;
@@ -333,11 +338,13 @@ export default function RadioPucciotto() {
       audioRef.current.pause();
       setStatus("In pausa");
     }
-  }, [isPlaying, ytReady]);
+  }, [isPlaying, ytReady, isGestionale]);
 
-  // Quando cambia il brano: carica il video su YouTube (o il file <audio> per "Le mie canzoni")
+  // Quando cambia il brano: carica il video su YouTube (o il file <audio> per "Le mie canzoni").
+  // SOLO gestionale — in vista pubblica il caricamento è governato esclusivamente
+  // dall'effetto legato a radioTrack (Firebase), per non spezzare la sincronizzazione.
   useEffect(() => {
-    if (!current) return;
+    if (!isGestionale || !current) return;
     setStatus("Caricamento...");
     setProgress(0);
     setDuration(0);
@@ -356,11 +363,27 @@ export default function RadioPucciotto() {
         ytPlayerRef.current.cueVideoById(current.videoId);
       }
     }
-  }, [current?.id, ytReady]);
+  }, [current?.id, ytReady, isGestionale]);
 
-  // Polling per aggiornare avanzamento/durata del player YouTube
+  // Vista pubblica: Play/Pausa dell'ascolto locale, pilotato da radioTrack (non da `current`)
   useEffect(() => {
-    if (current?.isCustom) return;
+    if (isGestionale || !radioTrack) return;
+    if (radioTrack.isCustom) {
+      if (!audioRef.current) return;
+      if (isPlaying) audioRef.current.play().catch(() => {});
+      else audioRef.current.pause();
+    } else {
+      if (!ytReady || !ytPlayerRef.current) return;
+      if (isPlaying) ytPlayerRef.current.playVideo();
+      else ytPlayerRef.current.pauseVideo();
+    }
+  }, [isPlaying, ytReady, isGestionale, radioTrack]);
+
+  // Polling per aggiornare avanzamento/durata del player YouTube.
+  // Gestionale: segue `current`. Vista pubblica: segue radioTrack (il brano trasmesso).
+  useEffect(() => {
+    const isCustomNow = isGestionale ? current?.isCustom : radioTrack?.isCustom;
+    if (isCustomNow) return; // per i brani custom il progresso arriva da onTimeUpdate dell'<audio>
     const id = setInterval(() => {
       const p = ytPlayerRef.current;
       if (p && p.getCurrentTime) {
@@ -369,7 +392,7 @@ export default function RadioPucciotto() {
       }
     }, 500);
     return () => clearInterval(id);
-  }, [current?.isCustom]);
+  }, [isGestionale, current?.isCustom, radioTrack?.isCustom]);
 
   const removeCustomTrack = (id) => {
     setCustomTracks((prev) => {
@@ -476,28 +499,52 @@ export default function RadioPucciotto() {
     }
   }, [current?.id]);
 
-  // Vista radio: ascolta Firebase in tempo reale e si sincronizza
-  const [radioTrack, setRadioTrack] = useState(null);
+  // Vista radio pubblica: ascolta Firebase in tempo reale, è l'UNICA fonte del brano in onda.
+  // Aggiorna solo lo stato: il caricamento nel player YT / <audio> è gestito da un effetto
+  // dedicato più sotto, che reagisce a radioTrack e sa gestire sia YouTube che brani custom.
   useEffect(() => {
     if (isGestionale) return;
     const nowPlayingRef = ref(db, "nowPlaying");
     const unsub = onValue(nowPlayingRef, (snapshot) => {
-      const data = snapshot.val();
-      if (!data) return;
-      setRadioTrack(data);
-      // Sincronizzazione: calcola la posizione attuale nel brano
-      const elapsed = (Date.now() - data.startedAt) / 1000;
-      if (ytPlayerRef.current && ytReady && data.videoId) {
-        if (data.videoId !== ytPlayerRef.current.getVideoData?.()?.video_id) {
-          ytPlayerRef.current.loadVideoById({ videoId: data.videoId, startSeconds: elapsed });
-        } else {
-          ytPlayerRef.current.seekTo(elapsed, true);
-          ytPlayerRef.current.playVideo();
-        }
-      }
+      setRadioTrack(snapshot.val());
     });
     return () => unsub();
-  }, [ytReady, isGestionale]);
+  }, [isGestionale]);
+
+  // Vista radio pubblica: quando arriva/cambia radioTrack, carica il brano giusto
+  // (YouTube o file custom) e si posiziona nel punto esatto di trasmissione, sincronizzato.
+  useEffect(() => {
+    if (isGestionale || !radioTrack) return;
+
+    if (radioTrack.isCustom && radioTrack.url) {
+      // Brano "Le mie canzoni": file audio diretto
+      ytPlayerRef.current?.pauseVideo?.();
+      if (audioRef.current && audioRef.current.src !== new URL(radioTrack.url, window.location.href).href) {
+        audioRef.current.src = radioTrack.url;
+        audioRef.current.load();
+      }
+      const elapsed = (Date.now() - radioTrack.startedAt) / 1000;
+      const startPlayback = () => {
+        if (!audioRef.current) return;
+        if (elapsed >= 0 && elapsed < (audioRef.current.duration || Infinity)) {
+          audioRef.current.currentTime = elapsed;
+        }
+        audioRef.current.play().then(() => setIsPlaying(true)).catch(() => {});
+      };
+      if (audioRef.current?.readyState >= 1) startPlayback();
+      else audioRef.current?.addEventListener("loadedmetadata", startPlayback, { once: true });
+    } else if (radioTrack.videoId && ytReady && ytPlayerRef.current) {
+      const elapsed = Math.max(0, (Date.now() - radioTrack.startedAt) / 1000);
+      const currentVideoId = ytPlayerRef.current.getVideoData?.()?.video_id;
+      if (radioTrack.videoId !== currentVideoId) {
+        ytPlayerRef.current.loadVideoById({ videoId: radioTrack.videoId, startSeconds: elapsed });
+      } else {
+        ytPlayerRef.current.seekTo(elapsed, true);
+        ytPlayerRef.current.playVideo();
+      }
+      setIsPlaying(true);
+    }
+  }, [radioTrack, ytReady, isGestionale]);
 
   const formatTime = (s) => {
     if (!s || isNaN(s)) return "0:00";
@@ -507,6 +554,10 @@ export default function RadioPucciotto() {
   };
 
   const pct = duration ? (progress / duration) * 100 : 0;
+
+  // Nella vista pubblica il brano mostrato è SEMPRE quello trasmesso dal gestionale
+  const publicTrack = radioTrack;
+  const isLive = !!publicTrack;
 
   // ─── VISTA RADIO PUBBLICA ────────────────────────────────────────────────
   if (!isGestionale) return (
@@ -522,8 +573,8 @@ export default function RadioPucciotto() {
       <header style={{ width: "100%", padding: "20px 28px", display: "flex", alignItems: "center", justifyContent: "space-between", borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
         <div style={{ fontFamily: "'Lobster', cursive", fontSize: "26px", color: RED }}>Radio Pucciotto</div>
         <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-          <div style={{ width: 8, height: 8, borderRadius: "50%", background: isPlaying ? "#27ae60" : "#888", boxShadow: isPlaying ? "0 0 6px #27ae60" : "none" }} />
-          <span style={{ fontSize: "12px", color: "#888", letterSpacing: "1px" }}>LIVE</span>
+          <div style={{ width: 8, height: 8, borderRadius: "50%", background: isLive ? "#27ae60" : "#888", boxShadow: isLive ? "0 0 6px #27ae60" : "none" }} />
+          <span style={{ fontSize: "12px", color: "#888", letterSpacing: "1px" }}>{isLive ? "LIVE" : "OFFLINE"}</span>
         </div>
       </header>
 
@@ -532,13 +583,13 @@ export default function RadioPucciotto() {
 
         {/* Player YT + equalizzatore */}
         <div style={{ position: "relative", width: 180, height: 180 }}>
-          <div style={{ width: 180, height: 180, borderRadius: "50%", background: `radial-gradient(circle, ${current?.color || RED}33, ${BLACK})`, border: `3px solid ${current?.color || RED}55`, display: "flex", alignItems: "center", justifyContent: "center", animation: isPlaying ? "spin 12s linear infinite" : "none" }}>
+          <div style={{ width: 180, height: 180, borderRadius: "50%", background: `radial-gradient(circle, ${publicTrack?.color || RED}33, ${BLACK})`, border: `3px solid ${publicTrack?.color || RED}55`, display: "flex", alignItems: "center", justifyContent: "center", animation: isPlaying && isLive ? "spin 12s linear infinite" : "none" }}>
             <div style={{ width: 60, height: 60, borderRadius: "50%", background: BLACK, display: "flex", alignItems: "center", justifyContent: "center" }}>
               <div id="yt-player" style={{ width: 1, height: 1, overflow: "hidden", opacity: 0, position: "absolute" }} />
               {/* equalizzatore visivo */}
               <div style={{ display: "flex", gap: "4px", alignItems: "center", height: "24px" }}>
                 {[0,1,2,3,4].map((i) => (
-                  <div key={i} style={{ width: "3px", height: "100%", borderRadius: "2px", background: WHITE, animation: isPlaying ? `pulse ${0.5 + i * 0.12}s ease-in-out infinite` : "none", transform: isPlaying ? undefined : "scaleY(0.2)", opacity: isPlaying ? 1 : 0.3 }} />
+                  <div key={i} style={{ width: "3px", height: "100%", borderRadius: "2px", background: WHITE, animation: isPlaying && isLive ? `pulse ${0.5 + i * 0.12}s ease-in-out infinite` : "none", transform: isPlaying && isLive ? undefined : "scaleY(0.2)", opacity: isPlaying && isLive ? 1 : 0.3 }} />
                 ))}
               </div>
             </div>
@@ -547,15 +598,25 @@ export default function RadioPucciotto() {
 
         {/* Info brano */}
         <div style={{ textAlign: "center" }}>
-          <div style={{ fontSize: "11px", color: current?.color || RED, letterSpacing: "2px", fontWeight: 700, marginBottom: "10px", textTransform: "uppercase" }}>{current?.category || "—"}</div>
-          <div style={{ fontSize: "22px", fontWeight: 700, lineHeight: 1.2, marginBottom: "8px" }}>{current?.title || "Caricamento..."}</div>
-          <div style={{ fontSize: "15px", color: "#aaa" }}>{current?.artist || ""}</div>
+          {isLive ? (
+            <>
+              <div style={{ fontSize: "11px", color: publicTrack?.color || RED, letterSpacing: "2px", fontWeight: 700, marginBottom: "10px", textTransform: "uppercase" }}>{publicTrack?.category || "—"}</div>
+              <div style={{ fontSize: "22px", fontWeight: 700, lineHeight: 1.2, marginBottom: "8px" }}>{publicTrack?.title}</div>
+              <div style={{ fontSize: "15px", color: "#aaa" }}>{publicTrack?.artist || ""}</div>
+            </>
+          ) : (
+            <>
+              <div style={{ fontSize: "11px", color: "#888", letterSpacing: "2px", fontWeight: 700, marginBottom: "10px", textTransform: "uppercase" }}>Radio Pucciotto</div>
+              <div style={{ fontSize: "22px", fontWeight: 700, lineHeight: 1.2, marginBottom: "8px" }}>In attesa della diretta...</div>
+              <div style={{ fontSize: "15px", color: "#aaa" }}>La trasmissione partirà a breve</div>
+            </>
+          )}
         </div>
 
         {/* Barra avanzamento */}
         <div style={{ width: "100%", display: "flex", flexDirection: "column", gap: "6px" }}>
           <div style={{ height: "3px", borderRadius: "2px", background: "rgba(255,255,255,0.1)", overflow: "hidden" }}>
-            <div style={{ height: "100%", width: `${pct}%`, background: current?.color || RED, transition: "width 0.5s linear" }} />
+            <div style={{ height: "100%", width: `${pct}%`, background: publicTrack?.color || RED, transition: "width 0.5s linear" }} />
           </div>
           <div style={{ display: "flex", justifyContent: "space-between", fontSize: "11px", color: "#555" }}>
             <span>{formatTime(progress)}</span>
@@ -563,13 +624,14 @@ export default function RadioPucciotto() {
           </div>
         </div>
 
-        {/* Controlli */}
+        {/* Controlli: nella radio pubblica solo Play/Pausa dell'ascolto locale, niente skip */}
         <div style={{ display: "flex", alignItems: "center", gap: "32px" }}>
-          <button className="pc-btn" onClick={goPrev} style={{ background: "none", border: "none", cursor: "pointer", color: "#888" }}><SkipBack size={28} /></button>
-          <button onClick={() => setIsPlaying((p) => !p)} style={{ width: 64, height: 64, borderRadius: "50%", background: RED, border: "none", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: `0 0 20px ${RED}55` }}>
+          <button
+            onClick={() => setIsPlaying((p) => !p)}
+            disabled={!isLive}
+            style={{ width: 64, height: 64, borderRadius: "50%", background: isLive ? RED : "#444", border: "none", cursor: isLive ? "pointer" : "not-allowed", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: isLive ? `0 0 20px ${RED}55` : "none" }}>
             {isPlaying ? <Pause size={28} color={WHITE} fill={WHITE} /> : <Play size={28} color={WHITE} fill={WHITE} />}
           </button>
-          <button className="pc-btn" onClick={goNext} style={{ background: "none", border: "none", cursor: "pointer", color: "#888" }}><SkipForward size={28} /></button>
         </div>
 
         {/* Volume */}
@@ -591,8 +653,9 @@ export default function RadioPucciotto() {
         Radio Pucciotto — musica © dei rispettivi titolari, via YouTube
       </footer>
 
-      <audio ref={audioRef} onTimeUpdate={handleTimeUpdate} onEnded={goNext} onError={() => setStatus("Errore")}
-        onCanPlay={() => { if (shouldPlayRef.current) audioRef.current?.play().catch(() => {}); }} />
+      <audio ref={audioRef} onTimeUpdate={handleTimeUpdate}
+        onEnded={() => setIsPlaying(false)}
+        onError={() => setStatus("Errore")} />
       <audio ref={adAudioRef} />
     </div>
   );
