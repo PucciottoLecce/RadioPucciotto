@@ -492,12 +492,15 @@ export default function RadioPucciotto() {
     spotAudio.addEventListener("ended", restore);
   };
 
-  // Gestionale: pubblica su Firebase ogni volta che current cambia (incluso click su brano dalla lista)
+  // Gestionale: pubblica su Firebase ogni volta che current cambia, o quando si preme Play
+  // sul brano già selezionato (senza isPlaying nelle dipendenze, il click su Play da solo
+  // non ripubblicava nulla se il brano non cambiava — questo è il motivo per cui la radio
+  // pubblica restava su "In attesa della diretta...").
   useEffect(() => {
     if (isGestionale && current && isPlaying) {
       publishNowPlaying(current);
     }
-  }, [current?.id]);
+  }, [current?.id, isPlaying, isGestionale]);
 
   // Vista radio pubblica: ascolta Firebase in tempo reale, è l'UNICA fonte del brano in onda.
   // Aggiorna solo lo stato: il caricamento nel player YT / <audio> è gestito da un effetto
