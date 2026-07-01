@@ -158,14 +158,14 @@ export default function RadioPucciotto() {
     })();
 
     const GENRES = [
-      { label: "Pop",          lang: "en" },
-      { label: "Rock",         lang: "en" },
-      { label: "Elettronica",  lang: "en" },
-      { label: "Hip Hop",      lang: "en" },
-      { label: "Reggaeton",    lang: "es" },
-      { label: "RnB",          lang: "en" },
-      { label: "Indie",        lang: "en" },
-      { label: "Dance",        lang: "en" },
+      { label: "Pop",          query: "pop music",              lang: "en" },
+      { label: "Rock",         query: "rock music",             lang: "en" },
+      { label: "Elettronica",  query: "electronic dance music", lang: "en" },
+      { label: "Hip Hop",      query: "hip hop music",          lang: "en" },
+      { label: "Reggaeton",    query: "reggaeton",              lang: "es" },
+      { label: "RnB",          query: "rnb music",              lang: "en" },
+      { label: "Indie",        query: "indie pop music",        lang: "en" },
+      { label: "Dance",        query: "dance pop music",        lang: "en" },
     ];
     const PER_GENRE = 15;
 
@@ -173,8 +173,8 @@ export default function RadioPucciotto() {
     const currentYear = new Date().getFullYear();
     const publishedAfter = isTrending ? `${currentYear - 1}-01-01T00:00:00Z` : null;
 
-    const fetchSlice = ({ label, lang }) => {
-      const q = encodeURIComponent(`${label} official music video`);
+    const fetchSlice = ({ label, query, lang }) => {
+      const q = encodeURIComponent(`${query} official music video`);
       let url = `https://www.googleapis.com/youtube/v3/search?part=snippet&q=${q}&type=video&videoCategoryId=10&order=viewCount&maxResults=${PER_GENRE}&regionCode=US&relevanceLanguage=${lang}&key=${YOUTUBE_API_KEY}`;
       if (publishedAfter) url += `&publishedAfter=${publishedAfter}`;
       return fetch(url)
@@ -182,15 +182,18 @@ export default function RadioPucciotto() {
         .then((data) => {
           const hasNonLatin = (str) => /[\u0900-\u097F\u0980-\u09FF\u0A00-\u0A7F\u0A80-\u0AFF\u0B00-\u0B7F\u0B80-\u0BFF\u0C00-\u0C7F\u0C80-\u0CFF\u0D00-\u0D7F\u0E00-\u0E7F\u0F00-\u0FFF\u1000-\u109F\u1100-\u11FF\u3000-\u9FFF\uA000-\uA48F\uAC00-\uD7AF\uF900-\uFAFF\u3400-\u4DBF]/.test(str);
           const isSpam = (title) => {
-            if (title.length > 80) return true; // titoli troppo lunghi
+            if (title.length > 80) return true;
             const t = title.toLowerCase();
             return (
-              /\bfeat\.?.*feat\.?\b/.test(t) ||           // doppio feat (remix spam)
+              /\bfeat\.?.*feat\.?\b/.test(t) ||
               /\b(subscribe|follow|like|download|stream|out now|available now|new song|new video|latest|lyric video|lyrics video|audio only|visualizer|topic)\b/.test(t) ||
               /\b(nonstop|non stop|jukebox|playlist|mashup|medley|mixtape|compilation|top \d+)\b/.test(t) ||
               /\b(full album|full movie|episode|trailer|teaser|bts|behind the scene)\b/.test(t) ||
-              (title.match(/[|•·—–]/g) || []).length >= 2 || // troppi separatori = aggregatore
-              /\d{4}.*\d{4}/.test(t)                        // due anni nel titolo = compilation
+              /\b(how to|tutorial|lesson|corso|come si|come fare|come registrare|come suonare|beginner|imparare|budget|low cost|cheap)\b/.test(t) ||
+              /^(come|how|tutorial|lezione|guida|recensione|review|unboxing)\b/.test(t) ||
+              (title.match(/#\w+/g) || []).length >= 2 ||
+              (title.match(/[|•·—–]/g) || []).length >= 2 ||
+              /\d{4}.*\d{4}/.test(t)
             );
           };
           return (data.items || [])
