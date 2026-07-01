@@ -95,6 +95,10 @@ export default function RadioPucciotto() {
   // musica si sblocca quando l'utente preme Play, ma quello degli spot resta bloccato
   // e finora impediva di sentire gli spot arrivati via Firebase. Lo sblocchiamo insieme.
   const adAudioUnlockedRef = useRef(false);
+  // true mentre il player YT sta girando in loop muto "di attesa" tra la fine di un
+  // brano e l'arrivo del prossimo da Firebase — evita che l'evento PLAYING sintetico
+  // di questo loop imposti erroneamente isPlaying/status come se fosse riproduzione vera
+  const keepAliveLoopRef = useRef(false);
 
   // Determina modalità all'avvio: ?gestionale nell'URL = pannello admin
   const isGestionale = window.location.search.includes("gestionale");
@@ -277,9 +281,33 @@ export default function RadioPucciotto() {
             // goNext() gestisce anche la logica dello spot pubblicitario locale (playSpotSolo):
             // deve girare SOLO nel gestionale, altrimenti in vista pubblica un video che finisce
             // può far scattare uno spot non sincronizzato e bloccare/disallineare il video.
-            if (e.data === window.YT.PlayerState.ENDED && isGestionale) goNext();
-            if (e.data === window.YT.PlayerState.PLAYING) { setStatus("In riproduzione"); setIsPlaying(true); }
-            if (e.data === window.YT.PlayerState.PAUSED) { setStatus("In pausa"); setIsPlaying(false); }
+            if (e.data === window.YT.PlayerState.ENDED) {
+              if (isGestionale) {
+                goNext();
+              } else {
+                // Vista pubblica: se lasciamo il player davvero "fermo" mentre aspettiamo
+                // il prossimo brano da Firebase, il successivo loadVideoById verrebbe
+                // bloccato dall'autoplay del browser (l'iframe YouTube è un dominio diverso,
+                // il click sul nostro Play non lo sblocca in modo permanente). Lo teniamo
+                // "vivo" in loop silenzioso finché non arriva il brano vero.
+                keepAliveLoopRef.current = true;
+                ytPlayerRef.current?.mute?.();
+                ytPlayerRef.current?.seekTo?.(0, true);
+                ytPlayerRef.current?.playVideo?.();
+              }
+            }
+            if (e.data === window.YT.PlayerState.PLAYING) {
+              if (keepAliveLoopRef.current) {
+                keepAliveLoopRef.current = false; // consumato: era solo il loop di attesa
+              } else {
+                setStatus("In riproduzione");
+                setIsPlaying(true);
+              }
+            }
+            if (e.data === window.YT.PlayerState.PAUSED && !keepAliveLoopRef.current) {
+              setStatus("In pausa");
+              setIsPlaying(false);
+            }
           },
         },
       });
@@ -448,23 +476,23 @@ export default function RadioPucciotto() {
       .catch((e) => console.warn("Firebase write error (adPlaying):", e));
   };
 
+  // NOTA: NON pubblichiamo qui su Firebase (niente publishNowPlaying manuale).
+  // C'è già un useEffect dedicato più sotto (quello con dipendenze
+  // [current?.id, isPlaying, isGestionale]) che pubblica automaticamente ogni
+  // volta che il brano cambia. Chiamare publishNowPlaying anche qui creava una
+  // DOPPIA scrittura su Firebase ad ogni skip: la vista pubblica riceveva due
+  // aggiornamenti quasi simultanei e il secondo interrompeva il caricamento del
+  // video appena avviato dal primo, mandando in stallo il player (da qui la
+  // necessità di premere Play manualmente).
   const goNext = () => {
     setPlaysUntilAd((p) => { if (p <= 1) { playSpotSolo(); return 3; } return p - 1; });
-    setCurrentIndex((i) => {
-      const next = (i + 1) % filtered.length;
-      publishNowPlaying(filtered[next]);
-      return next;
-    });
+    setCurrentIndex((i) => (i + 1) % filtered.length);
     setProgress(0);
     setIsPlaying(true);
   };
 
   const goPrev = () => {
-    setCurrentIndex((i) => {
-      const prev = (i - 1 + filtered.length) % filtered.length;
-      publishNowPlaying(filtered[prev]);
-      return prev;
-    });
+    setCurrentIndex((i) => (i - 1 + filtered.length) % filtered.length);
     setProgress(0);
     setIsPlaying(true);
   };
@@ -581,7 +609,7 @@ export default function RadioPucciotto() {
       if (isYT) ytPlayerRef.current?.setVolume?.(volume * 100);
       else if (audioRef.current) audioRef.current.volume = volume;
     }
-  }, [adTrack, isGestionale]);
+  }, [adTrack, isGestionale, volume, radioTrack]);
 
   // Vista radio pubblica: quando arriva/cambia radioTrack, carica il brano giusto
   // (YouTube o file custom) e si posiziona nel punto esatto di trasmissione, sincronizzato.
@@ -627,7 +655,10 @@ export default function RadioPucciotto() {
       const elapsed = Math.max(0, (Date.now() - radioTrack.startedAt) / 1000);
       if (isNewTrack) {
         lastPublicTrackKeyRef.current = trackKey;
+        keepAliveLoopRef.current = false; // arriva il brano vero: non è più il loop di attesa
         ytPlayerRef.current.loadVideoById({ videoId: radioTrack.videoId, startSeconds: elapsed });
+        ytPlayerRef.current.unMute?.();
+        ytPlayerRef.current.setVolume?.(volume * 100);
         // loadVideoById avvia sempre la riproduzione; se il browser blocca l'autoplay
         // (mancanza di interazione utente), onStateChange non passerà mai a PLAYING e
         // isPlaying resterà false: l'utente vedrà comunque il tasto Play pronto.
@@ -635,6 +666,9 @@ export default function RadioPucciotto() {
         // Ogni volta che l'utente (ri)avvia manualmente l'ascolto ci risincronizziamo
         // SEMPRE al punto esatto in cui si trova la diretta in questo istante — non a
         // dove il video si era fermato — così non parte più "da un punto diverso".
+        keepAliveLoopRef.current = false;
+        ytPlayerRef.current.unMute?.();
+        ytPlayerRef.current.setVolume?.(volume * 100);
         ytPlayerRef.current.seekTo(elapsed, true);
         ytPlayerRef.current.playVideo();
       } else {
@@ -737,6 +771,14 @@ export default function RadioPucciotto() {
                 adAudioUnlockedRef.current = true;
                 const a = adAudioRef.current;
                 const wasMuted = a.muted;
+                // IMPORTANTE: il tag <audio> degli spot non ha una src finché non
+                // arriva il primo evento "adPlaying" da Firebase. Chiamare play()
+                // senza sorgente falliva subito (nessun contenuto da riprodurre) e
+                // lo "sblocco" non avveniva davvero: il browser continuava a
+                // bloccare gli spot successivi innescati da Firebase (senza gesto
+                // utente diretto). Impostando qui una src reale (uno spot vero),
+                // il play muto va a buon fine e l'elemento resta sbloccato.
+                a.src = AD_SPOTS[0];
                 a.muted = true;
                 a.play().then(() => { a.pause(); a.currentTime = 0; a.muted = wasMuted; })
                   .catch(() => { a.muted = wasMuted; });
