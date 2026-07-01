@@ -99,6 +99,22 @@ export default function RadioPucciotto() {
   // brano e l'arrivo del prossimo da Firebase — evita che l'evento PLAYING sintetico
   // di questo loop imposti erroneamente isPlaying/status come se fosse riproduzione vera
   const keepAliveLoopRef = useRef(false);
+  // true per una breve finestra subito dopo aver chiamato loadVideoById(): serve a
+  // ignorare l'evento PAUSED "fantasma" che l'iframe YouTube a volte emette durante
+  // la transizione tra un video e il successivo, prima di arrivare davvero a PLAYING.
+  // Senza questo guardiano, quel PAUSED transitorio veniva scambiato per una pausa
+  // vera, e l'effetto che segue isPlaying chiamava pauseVideo() bloccando sul serio
+  // la riproduzione appena partita (successo sia nel gestionale che in vista pubblica).
+  const suppressPauseRef = useRef(false);
+  const suppressPauseTimeoutRef = useRef(null);
+  const armSuppressPause = () => {
+    suppressPauseRef.current = true;
+    if (suppressPauseTimeoutRef.current) clearTimeout(suppressPauseTimeoutRef.current);
+    // Rete di sicurezza: se dopo 2.5s non è arrivato un vero PLAYING (es. autoplay
+    // bloccato dal browser), torniamo a fidarci dei PAUSED per non restare "sordi"
+    // a un blocco reale che richiede all'utente di premere Play.
+    suppressPauseTimeoutRef.current = setTimeout(() => { suppressPauseRef.current = false; }, 2500);
+  };
 
   // Determina modalità all'avvio: ?gestionale nell'URL = pannello admin
   const isGestionale = window.location.search.includes("gestionale");
@@ -297,6 +313,8 @@ export default function RadioPucciotto() {
               }
             }
             if (e.data === window.YT.PlayerState.PLAYING) {
+              suppressPauseRef.current = false; // arrivato un PLAYING vero: la transizione è conclusa
+              if (suppressPauseTimeoutRef.current) { clearTimeout(suppressPauseTimeoutRef.current); suppressPauseTimeoutRef.current = null; }
               if (keepAliveLoopRef.current) {
                 keepAliveLoopRef.current = false; // consumato: era solo il loop di attesa
               } else {
@@ -304,7 +322,7 @@ export default function RadioPucciotto() {
                 setIsPlaying(true);
               }
             }
-            if (e.data === window.YT.PlayerState.PAUSED && !keepAliveLoopRef.current) {
+            if (e.data === window.YT.PlayerState.PAUSED && !keepAliveLoopRef.current && !suppressPauseRef.current) {
               setStatus("In pausa");
               setIsPlaying(false);
             }
@@ -408,6 +426,7 @@ export default function RadioPucciotto() {
       }
     } else if (ytReady && current.videoId) {
       if (isPlaying || shouldPlayRef.current) {
+        armSuppressPause();
         ytPlayerRef.current.loadVideoById(current.videoId);
       } else {
         ytPlayerRef.current.cueVideoById(current.videoId);
@@ -656,6 +675,7 @@ export default function RadioPucciotto() {
       if (isNewTrack) {
         lastPublicTrackKeyRef.current = trackKey;
         keepAliveLoopRef.current = false; // arriva il brano vero: non è più il loop di attesa
+        armSuppressPause();
         ytPlayerRef.current.loadVideoById({ videoId: radioTrack.videoId, startSeconds: elapsed });
         ytPlayerRef.current.unMute?.();
         ytPlayerRef.current.setVolume?.(volume * 100);
