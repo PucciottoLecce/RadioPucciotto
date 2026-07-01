@@ -17,7 +17,7 @@ const FALLBACK_TRACKS = [
 
 // Chiave API YouTube Data v3 — creala gratis su https://console.cloud.google.com/
 // (abilita "YouTube Data API v3" e genera una API key, poi incollala qui sotto)
-const YOUTUBE_API_KEY = "AIzaSyBCtBXIX_xFVF7x4itMzFxvP_toIpOJiFU";
+const YOUTUBE_API_KEY = import.meta.env.VITE_YOUTUBE_API_KEY || "";
 
 // Playlist di riserva usata mentre la ricerca automatica è in corso, o se fallisce
 const YOUTUBE_FALLBACK_TRACKS = [
@@ -122,8 +122,8 @@ export default function RadioPucciotto() {
 
   // Carica automaticamente i brani più popolari per genere da YouTube Data API v3
   useEffect(() => {
-    if (!YOUTUBE_API_KEY || YOUTUBE_API_KEY.startsWith("INSERISCI")) {
-      setLoadError("Imposta YOUTUBE_API_KEY in App.jsx. Uso playlist di riserva.");
+    if (!YOUTUBE_API_KEY) {
+      setLoadError("Imposta VITE_YOUTUBE_API_KEY (.env / variabili Vercel). Uso playlist di riserva.");
       setLoadingTracks(false);
       return;
     }
@@ -416,7 +416,7 @@ export default function RadioPucciotto() {
           </div>
           <div>
             <div style={{ fontFamily: "'Lobster', cursive", fontWeight: 400, fontSize: "24px", color: BLACK }}>Radio Pucciotto</div>
-            <div style={{ fontSize: "11px", color: "#888", letterSpacing: "1.5px" }}>MUSICA SENZA COPYRIGHT · LIVE</div>
+            <div style={{ fontSize: "11px", color: "#888", letterSpacing: "1.5px" }}>MUSICA VIA YOUTUBE · LIVE</div>
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
@@ -576,7 +576,7 @@ export default function RadioPucciotto() {
       </div>
 
       <footer style={{ padding: "16px 28px", textAlign: "center", fontSize: "11px", color: "#aaa", borderTop: "1px solid rgba(26,26,26,0.06)", background: WHITE }}>
-        Radio Pucciotto — brani royalty-free · Sponsorizzato da Pucciotto
+        Radio Pucciotto — musica © dei rispettivi titolari, via YouTube · Sponsorizzato da Pucciotto
       </footer>
     </div>
   );
