@@ -540,6 +540,8 @@ export default function RadioPucciotto() {
     </div>
   );
   // ─── FINE VISTA RADIO PUBBLICA ───────────────────────────────────────────
+
+  return (
     <div style={{ minHeight: "100vh", background: CREAM, fontFamily: "'DM Sans', sans-serif", color: BLACK, display: "flex", flexDirection: "column" }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Lobster&family=DM+Sans:wght@400;600;700&display=swap');
