@@ -120,10 +120,12 @@ export default function RadioPucciotto() {
       .catch(() => {});
   }, []);
 
-  // Carica automaticamente i brani più popolari per genere da YouTube Data API v3
+  // Carica automaticamente i brani per genere da YouTube Data API v3.
+  // Ad ogni apertura alterna casualmente tra "più ascoltati del momento" (ultimo anno)
+  // e "più ascoltati di sempre" (tutti i tempi, ordinati per view totali).
   useEffect(() => {
     if (!YOUTUBE_API_KEY) {
-      setLoadError("Imposta VITE_YOUTUBE_API_KEY (.env / variabili Vercel). Uso playlist di riserva.");
+      setLoadError("Imposta VITE_YOUTUBE_API_KEY nelle variabili Cloudflare. Uso playlist di riserva.");
       setLoadingTracks(false);
       return;
     }
@@ -137,12 +139,18 @@ export default function RadioPucciotto() {
       };
     })();
 
-    const GENRES = ["Pop", "Rock", "Elettronica", "Hip Hop", "Reggaeton", "RnB"];
-    const PER_GENRE = 8;
+    const GENRES = ["Pop", "Rock", "Elettronica", "Hip Hop", "Reggaeton", "RnB", "Indie", "Dance"];
+    const PER_GENRE = 15;
+
+    // 50% probabilità di caricare trending (ultimo anno) vs all-time (più visti in assoluto)
+    const isTrending = Math.random() < 0.5;
+    const currentYear = new Date().getFullYear();
+    const publishedAfter = isTrending ? `${currentYear - 1}-01-01T00:00:00Z` : null;
 
     const fetchSlice = (label) => {
       const q = encodeURIComponent(`${label} official music video`);
-      const url = `https://www.googleapis.com/youtube/v3/search?part=snippet&q=${q}&type=video&videoCategoryId=10&order=viewCount&maxResults=${PER_GENRE}&key=${YOUTUBE_API_KEY}`;
+      let url = `https://www.googleapis.com/youtube/v3/search?part=snippet&q=${q}&type=video&videoCategoryId=10&order=viewCount&maxResults=${PER_GENRE}&key=${YOUTUBE_API_KEY}`;
+      if (publishedAfter) url += `&publishedAfter=${publishedAfter}`;
       return fetch(url)
         .then((r) => { if (!r.ok) throw new Error("yt api error " + r.status); return r.json(); })
         .then((data) =>
@@ -165,6 +173,7 @@ export default function RadioPucciotto() {
         const mapped = arrays.flat();
         if (!mapped.length) throw new Error("Nessun brano trovato");
         setTracks(mapped);
+        setLoadError(isTrending ? "🔥 Più ascoltati del momento" : "🏆 Più ascoltati di sempre");
         setLoadingTracks(false);
       })
       .catch(() => {
@@ -434,8 +443,16 @@ export default function RadioPucciotto() {
       </div>
 
       {(loadingTracks || loadError) && (
-        <div style={{ padding: "8px 28px", fontSize: "12px", textAlign: "center", background: loadError ? "rgba(192,57,43,0.08)" : "rgba(26,26,26,0.04)", color: loadError ? RED : "#888" }}>
-          {loadingTracks ? "Aggiornamento playlist dai brani più ascoltati..." : loadError}
+        <div style={{
+          padding: "8px 28px", fontSize: "12px", textAlign: "center",
+          background: loadingTracks ? "rgba(26,26,26,0.04)"
+            : loadError?.startsWith("🔥") || loadError?.startsWith("🏆") ? "rgba(39,174,96,0.08)"
+            : "rgba(192,57,43,0.08)",
+          color: loadingTracks ? "#888"
+            : loadError?.startsWith("🔥") || loadError?.startsWith("🏆") ? "#27ae60"
+            : RED
+        }}>
+          {loadingTracks ? "Aggiornamento playlist..." : loadError}
         </div>
       )}
 
