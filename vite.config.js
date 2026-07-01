@@ -11,4 +11,7 @@ export default defineConfig({
   },
   assetsInclude: ['**/*.mp3', '**/*.wav', '**/*.ogg', '**/*.flac'],
   appType: 'spa',
+  optimizeDeps: {
+    include: ['firebase/app', 'firebase/database'],
+  },
 })
