@@ -179,18 +179,37 @@ export default function RadioPucciotto() {
       if (publishedAfter) url += `&publishedAfter=${publishedAfter}`;
       return fetch(url)
         .then((r) => { if (!r.ok) throw new Error("yt api error " + r.status); return r.json(); })
-        .then((data) =>
-          (data.items || []).map((it) => ({
-            id: it.id.videoId + "_" + label,
-            videoId: it.id.videoId,
-            title: it.snippet.title,
-            artist: it.snippet.channelTitle,
-            category: label,
-            color: colorFor(label),
-            isCustom: false,
-            url: null,
-          }))
-        )
+        .then((data) => {
+          const hasNonLatin = (str) => /[\u0900-\u097F\u0980-\u09FF\u0A00-\u0A7F\u0A80-\u0AFF\u0B00-\u0B7F\u0B80-\u0BFF\u0C00-\u0C7F\u0C80-\u0CFF\u0D00-\u0D7F\u0E00-\u0E7F\u0F00-\u0FFF\u1000-\u109F\u1100-\u11FF\u3000-\u9FFF\uA000-\uA48F\uAC00-\uD7AF\uF900-\uFAFF\u3400-\u4DBF]/.test(str);
+          const isSpam = (title) => {
+            if (title.length > 80) return true; // titoli troppo lunghi
+            const t = title.toLowerCase();
+            return (
+              /\bfeat\.?.*feat\.?\b/.test(t) ||           // doppio feat (remix spam)
+              /\b(subscribe|follow|like|download|stream|out now|available now|new song|new video|latest|lyric video|lyrics video|audio only|visualizer|topic)\b/.test(t) ||
+              /\b(nonstop|non stop|jukebox|playlist|mashup|medley|mixtape|compilation|top \d+)\b/.test(t) ||
+              /\b(full album|full movie|episode|trailer|teaser|bts|behind the scene)\b/.test(t) ||
+              (title.match(/[|•·—–]/g) || []).length >= 2 || // troppi separatori = aggregatore
+              /\d{4}.*\d{4}/.test(t)                        // due anni nel titolo = compilation
+            );
+          };
+          return (data.items || [])
+            .filter((it) => {
+              const title = it.snippet.title;
+              const channel = it.snippet.channelTitle;
+              return !hasNonLatin(title) && !hasNonLatin(channel) && !isSpam(title);
+            })
+            .map((it) => ({
+              id: it.id.videoId + "_" + label,
+              videoId: it.id.videoId,
+              title: it.snippet.title,
+              artist: it.snippet.channelTitle,
+              category: label,
+              color: colorFor(label),
+              isCustom: false,
+              url: null,
+            }));
+        })
         .catch(() => []);
     };
 
