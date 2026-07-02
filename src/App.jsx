@@ -219,7 +219,18 @@ export default function RadioPucciotto() {
       let url = `https://www.googleapis.com/youtube/v3/search?part=snippet&q=${q}&type=video&videoCategoryId=10&order=viewCount&maxResults=${PER_GENRE}&regionCode=US&relevanceLanguage=${lang}&key=${YOUTUBE_API_KEY}`;
       if (publishedAfter) url += `&publishedAfter=${publishedAfter}`;
       return fetch(url)
-        .then((r) => { if (!r.ok) throw new Error("yt api error " + r.status); return r.json(); })
+        .then((r) => {
+          if (!r.ok) {
+            // Non ingoiamo più l'errore in silenzio: lo logghiamo con il motivo esatto
+            // restituito da Google (es. "quotaExceeded", "keyInvalid", "accessNotConfigured")
+            // così in console si vede subito la causa reale invece di dover indovinare.
+            return r.json().catch(() => null).then((body) => {
+              const reason = body?.error?.errors?.[0]?.reason || body?.error?.message || r.status;
+              throw new Error(`YouTube API [${label}] fallita: ${reason}`);
+            });
+          }
+          return r.json();
+        })
         .then((data) => {
           const hasNonLatin = (str) => /[\u0900-\u097F\u0980-\u09FF\u0A00-\u0A7F\u0A80-\u0AFF\u0B00-\u0B7F\u0B80-\u0BFF\u0C00-\u0C7F\u0C80-\u0CFF\u0D00-\u0D7F\u0E00-\u0E7F\u0F00-\u0FFF\u1000-\u109F\u1100-\u11FF\u3000-\u9FFF\uA000-\uA48F\uAC00-\uD7AF\uF900-\uFAFF\u3400-\u4DBF]/.test(str);
           const isSpam = (title) => {
@@ -254,7 +265,7 @@ export default function RadioPucciotto() {
               url: null,
             }));
         })
-        .catch(() => []);
+        .catch((err) => { console.warn(err.message || err); return []; });
     };
 
     Promise.all(GENRES.map(fetchSlice))
@@ -277,7 +288,8 @@ export default function RadioPucciotto() {
         setLoadError(label);
         setLoadingTracks(false);
       })
-      .catch(() => {
+      .catch((err) => {
+        console.warn("Caricamento brani YouTube fallito del tutto:", err.message || err);
         setLoadError("Impossibile caricare i brani da YouTube. Uso playlist di riserva.");
         setLoadingTracks(false);
       });
@@ -445,15 +457,21 @@ export default function RadioPucciotto() {
       // Brani caricati dall'utente: restano riprodotti via tag <audio>
       ytPlayerRef.current?.pauseVideo?.();
       if (audioRef.current) {
-        // Interrompiamo in modo sicuro un'eventuale play() del brano precedente
-        // ancora "in volo" PRIMA di cambiare sorgente: cambiare src/chiamare load()
-        // mentre quella promise è ancora pendente è la causa dei blocchi e delle
-        // "ripartenze fantasma" viste dopo uno skip sui brani locali.
-        safePauseAudio(audioRef.current);
+        // Qui usiamo un pause() diretto e sincrono (non safePauseAudio): stiamo per
+        // sostituire subito la sorgente, quindi vogliamo fermare SUBITO il brano
+        // precedente. Usare la versione "differita" qui era sbagliato: il pause
+        // poteva arrivare DOPO aver già caricato il nuovo brano, silenziandolo per
+        // errore invece di fermare quello vecchio.
+        audioRef.current.pause();
         audioRef.current.src = current.url;
         audioRef.current.load();
       }
     } else if (ytReady && current.videoId) {
+      // IMPORTANTE: se si arriva qui da un brano locale (custom), il tag <audio> continua
+      // a suonare in sottofondo finché non lo fermiamo esplicitamente — è la causa del
+      // "mix" tra il brano locale e quello nuovo di YouTube sentito solo nel gestionale
+      // (la vista pubblica lo fermava già correttamente).
+      if (audioRef.current) audioRef.current.pause();
       if (isPlaying || shouldPlayRef.current) {
         armSuppressPause();
         ytPlayerRef.current.loadVideoById(current.videoId);
@@ -682,7 +700,11 @@ export default function RadioPucciotto() {
 
       if (isNewTrack) {
         lastPublicTrackKeyRef.current = trackKey;
-        safePauseAudio(audioRef.current);
+        // Pause sincrono: stiamo per sostituire subito la sorgente, quindi vogliamo
+        // fermare SUBITO il brano precedente (stesso motivo del fix nel gestionale:
+        // una pausa "differita" qui rischia di arrivare dopo il caricamento del nuovo
+        // brano e silenziarlo per errore invece di fermare quello vecchio).
+        audioRef.current.pause();
         audioRef.current.src = radioTrack.url;
         audioRef.current.load();
         const elapsed = (Date.now() - radioTrack.startedAt) / 1000;
