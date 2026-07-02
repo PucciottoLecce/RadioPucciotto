@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useMemo } from "react";
-import { Play, Pause, SkipForward, SkipBack, Volume2, Trash2, Shuffle, Music } from "lucide-react";
+import { Play, Pause, SkipForward, SkipBack, Volume2, Trash2, Shuffle, Music, Check } from "lucide-react";
 import { db } from "./firebase.js";
 import { ref, set, onValue, onDisconnect } from "firebase/database";
 
@@ -67,6 +67,16 @@ export default function RadioPucciotto() {
   const [progress, setProgress] = useState(0);
   const [duration, setDuration] = useState(0);
   const [volume, setVolume] = useState(0.8);
+  // Volume dedicato degli spot pubblicitari, indipendente dal volume generale ma
+  // scalato su di esso (vedi calcolo in playSpotInBackground/playSpotSolo/effetto
+  // pubblico): a volume generale = 0 anche gli spot devono essere a 0, non più
+  // udibili "comunque" come prima (c'era un pavimento fisso +0.2 che li rendeva
+  // sempre percepibili anche a volume minimo).
+  const [adVolume, setAdVolume] = useState(0.7);
+  // Attivano/disattivano indipendentemente i due meccanismi di spot: quello
+  // periodico ogni 2 minuti in sottofondo, e quello "solo" ogni 3 canzoni.
+  const [adEvery2MinEnabled, setAdEvery2MinEnabled] = useState(true);
+  const [adEvery3SongsEnabled, setAdEvery3SongsEnabled] = useState(true);
   const [adLine, setAdLine] = useState(0);
   const [playsUntilAd, setPlaysUntilAd] = useState(3);
   const [status, setStatus] = useState("Pronto");
@@ -410,9 +420,9 @@ export default function RadioPucciotto() {
   // all'evento "adPlaying" da Firebase (vedi l'effetto più sotto che ascolta adTrack).
   useEffect(() => {
     if (!isGestionale) return;
-    const id = setInterval(() => { if (isPlaying) playSpotInBackground(); }, 120000);
+    const id = setInterval(() => { if (isPlaying && adEvery2MinEnabled) playSpotInBackground(); }, 120000);
     return () => clearInterval(id);
-  }, [isPlaying, volume, isGestionale]);
+  }, [isPlaying, volume, adVolume, adEvery2MinEnabled, isGestionale]);
 
   useEffect(() => {
     const id = setInterval(() => setAdLine((a) => (a + 1) % AD_LINES.length), 6000);
@@ -591,7 +601,10 @@ export default function RadioPucciotto() {
   // video appena avviato dal primo, mandando in stallo il player (da qui la
   // necessità di premere Play manualmente).
   const goNext = () => {
-    setPlaysUntilAd((p) => { if (p <= 1) { playSpotSolo(); return 3; } return p - 1; });
+    setPlaysUntilAd((p) => {
+      if (p <= 1) { if (adEvery3SongsEnabled) playSpotSolo(); return 3; }
+      return p - 1;
+    });
     setCurrentIndex((i) => (i + 1) % filtered.length);
     setProgress(0);
     setIsPlaying(true);
@@ -621,7 +634,9 @@ export default function RadioPucciotto() {
     else if (audioRef.current) audioRef.current.volume = originalVolume * 0.5;
     spotAudio.src = spotUrl;
     spotAudio.currentTime = 0;
-    spotAudio.volume = Math.min(1, originalVolume + 0.2);
+    // Volume dello spot proporzionale al volume generale (niente più +0.2 fisso):
+    // a volume generale basso/zero, lo spot deve essere basso/zero anch'esso.
+    spotAudio.volume = Math.min(1, originalVolume * adVolume);
     spotAudio.play().catch((e) => console.warn("Spot bloccato:", e.message));
     publishAdPlaying(spotUrl);
     const restore = () => {
@@ -642,7 +657,9 @@ export default function RadioPucciotto() {
     else audioRef.current?.pause();
     spotAudio.src = spotUrl;
     spotAudio.currentTime = 0;
-    spotAudio.volume = Math.min(1, volume + 0.2);
+    // Volume dello spot proporzionale al volume generale (niente più +0.2 fisso):
+    // a volume generale basso/zero, lo spot deve essere basso/zero anch'esso.
+    spotAudio.volume = Math.min(1, volume * adVolume);
     spotAudio.play().catch((e) => console.warn("Spot bloccato:", e.message));
     publishAdPlaying(spotUrl);
     const restore = () => {
@@ -721,7 +738,9 @@ export default function RadioPucciotto() {
         // saltare in avanti l'audio, altrimenti si perdono le prime parole dello spot.
         const SYNC_THRESHOLD = 1.5; // secondi
         spotAudio.currentTime = (elapsed > SYNC_THRESHOLD && elapsed < (spotAudio.duration || Infinity)) ? elapsed : 0;
-        spotAudio.volume = Math.min(1, volume + 0.2);
+        // Volume dello spot proporzionale al volume generale (niente più +0.2 fisso):
+        // a volume generale basso/zero, lo spot deve essere basso/zero anch'esso.
+        spotAudio.volume = Math.min(1, volume * adVolume);
         spotAudio.play().catch((e) => console.warn("Spot bloccato:", e.message));
       };
       if (spotAudio.readyState >= 1) startSpot();
@@ -731,7 +750,7 @@ export default function RadioPucciotto() {
       if (isYT) ytPlayerRef.current?.setVolume?.(volume * 100);
       else if (audioRef.current) audioRef.current.volume = volume;
     }
-  }, [adTrack, isGestionale, volume, radioTrack]);
+  }, [adTrack, isGestionale, volume, adVolume, radioTrack]);
 
   // Vista radio pubblica: quando arriva/cambia radioTrack, carica il brano giusto
   // (YouTube o file custom) e si posiziona nel punto esatto di trasmissione, sincronizzato.
@@ -1102,6 +1121,54 @@ export default function RadioPucciotto() {
             </div>
             <div className="ctrl-spacer" style={{ flex: 1 }} />
             <div className="ad-counter" style={{ fontSize: "11px", color: "#888", width: "70px", textAlign: "right", flexShrink: 0 }}>Prox. spot: {playsUntilAd}</div>
+          </div>
+
+          {/* Volume dedicato degli spot pubblicitari — indipendente dal volume generale,
+              ma sempre scalato su di esso: a volume generale a zero anche gli spot
+              taceranno, qui regoli solo quanto "spiccano" rispetto alla musica. */}
+          <div className="vol-control" style={{ display: "flex", alignItems: "center", gap: "10px", paddingTop: "4px", borderTop: "1px dashed rgba(26,26,26,0.1)" }}>
+            <Volume2 size={16} color={RED} />
+            <span style={{ fontSize: "12px", color: "#888", flexShrink: 0 }}>Volume spot</span>
+            <input type="range" min="0" max="1" step="0.05" value={adVolume} onChange={(e) => setAdVolume(parseFloat(e.target.value))} style={{ flex: 1, accentColor: RED }} />
+            <span style={{ fontSize: "11px", color: "#888", width: "34px", textAlign: "right", flexShrink: 0 }}>{Math.round(adVolume * 100)}%</span>
+          </div>
+
+          {/* Attivazione/disattivazione indipendente dei due meccanismi di spot */}
+          <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+            <div className="cat-pill" onClick={() => setAdEvery2MinEnabled((v) => !v)} style={{
+              padding: "8px 16px", borderRadius: "20px", fontSize: "13px", fontWeight: 600,
+              background: adEvery2MinEnabled ? RED : WHITE,
+              color: adEvery2MinEnabled ? WHITE : BLACK,
+              border: adEvery2MinEnabled ? "none" : "1px solid rgba(26,26,26,0.12)",
+              display: "flex", alignItems: "center", gap: "6px",
+            }}>
+              <span style={{
+                width: 16, height: 16, borderRadius: "4px", flexShrink: 0,
+                background: adEvery2MinEnabled ? WHITE : "transparent",
+                border: adEvery2MinEnabled ? "none" : "1px solid rgba(26,26,26,0.3)",
+                display: "flex", alignItems: "center", justifyContent: "center",
+              }}>
+                {adEvery2MinEnabled && <Check size={12} color={RED} strokeWidth={3} />}
+              </span>
+              Spot ogni 2 minuti
+            </div>
+            <div className="cat-pill" onClick={() => setAdEvery3SongsEnabled((v) => !v)} style={{
+              padding: "8px 16px", borderRadius: "20px", fontSize: "13px", fontWeight: 600,
+              background: adEvery3SongsEnabled ? RED : WHITE,
+              color: adEvery3SongsEnabled ? WHITE : BLACK,
+              border: adEvery3SongsEnabled ? "none" : "1px solid rgba(26,26,26,0.12)",
+              display: "flex", alignItems: "center", gap: "6px",
+            }}>
+              <span style={{
+                width: 16, height: 16, borderRadius: "4px", flexShrink: 0,
+                background: adEvery3SongsEnabled ? WHITE : "transparent",
+                border: adEvery3SongsEnabled ? "none" : "1px solid rgba(26,26,26,0.3)",
+                display: "flex", alignItems: "center", justifyContent: "center",
+              }}>
+                {adEvery3SongsEnabled && <Check size={12} color={RED} strokeWidth={3} />}
+              </span>
+              Spot ogni 3 canzoni
+            </div>
           </div>
 
           <audio ref={audioRef} onTimeUpdate={handleTimeUpdate} onEnded={goNext}
