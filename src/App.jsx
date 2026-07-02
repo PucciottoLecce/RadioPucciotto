@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useMemo } from "react";
 import { Play, Pause, SkipForward, SkipBack, Volume2, Trash2, Shuffle, Music } from "lucide-react";
 import { db } from "./firebase.js";
-import { ref, set, onValue } from "firebase/database";
+import { ref, set, onValue, onDisconnect } from "firebase/database";
 
 const RED   = "#c0392b";
 const WHITE = "#ffffff";
@@ -141,6 +141,19 @@ export default function RadioPucciotto() {
 
   const current = filtered[currentIndex] || filtered[0];
 
+  // Se il gestionale si chiude/ricarica/perde la connessione MENTRE uno spot è in
+  // corso, il "pulisci adPlaying alla fine dello spot" (evento "ended") non fa in
+  // tempo a scattare, e quello spot resta scritto su Firebase per sempre: i prossimi
+  // ascoltatori che si collegano lo trovano ancora lì e lo sentono partire "da solo".
+  // onDisconnect fa pulire il nodo lato server non appena Firebase rileva che questo
+  // client si è disconnesso, quale che sia il motivo (crash, chiusura tab, rete).
+  useEffect(() => {
+    if (!isGestionale) return;
+    const cleanup = onDisconnect(ref(db, "adPlaying"));
+    cleanup.set(null);
+    return () => { cleanup.cancel(); };
+  }, [isGestionale]);
+
   // Carica canzoni da public/my-song/index.json
   useEffect(() => {
     fetch("/my-song/index.json")
@@ -173,7 +186,11 @@ export default function RadioPucciotto() {
     }
 
     const CACHE_KEY = "rp_yt_cache";
-    const CACHE_TTL = 4 * 60 * 60 * 1000; // 4 ore in ms
+    // Alzata da 4 a 18 ore: con la chiave condivisa tra tutti i visitatori, ogni
+    // scadenza cache moltiplicata per tanti browser è proprio ciò che genera le
+    // raffiche che fanno scattare rateLimitExceeded (vedi anche il fix sotto sullo
+    // scaglionamento delle chiamate).
+    const CACHE_TTL = 18 * 60 * 60 * 1000;
 
     // Prova a leggere dalla cache
     try {
@@ -214,23 +231,32 @@ export default function RadioPucciotto() {
     const currentYear = new Date().getFullYear();
     const publishedAfter = isTrending ? `${currentYear - 1}-01-01T00:00:00Z` : null;
 
+    const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+
+    // Riprova con backoff SOLO sui 429 (rateLimitExceeded): quello è transitorio e a
+    // volte basta aspettare un attimo perché la raffica di richieste (nostre o di
+    // altri visitatori sulla stessa chiave) si diradi. Su altri errori (chiave
+    // invalida, API non abilitata, quota giornaliera esaurita) non ha senso riprovare.
+    const fetchJsonWithRetry = (url, label, attempt = 0) =>
+      fetch(url).then((r) => {
+        if (r.status === 429 && attempt < 2) {
+          const wait = 1200 * (attempt + 1) + Math.random() * 500;
+          return sleep(wait).then(() => fetchJsonWithRetry(url, label, attempt + 1));
+        }
+        if (!r.ok) {
+          return r.json().catch(() => null).then((body) => {
+            const reason = body?.error?.errors?.[0]?.reason || body?.error?.message || r.status;
+            throw new Error(`YouTube API [${label}] fallita: ${reason}`);
+          });
+        }
+        return r.json();
+      });
+
     const fetchSlice = ({ label, query, lang }) => {
       const q = encodeURIComponent(`${query} official music video`);
       let url = `https://www.googleapis.com/youtube/v3/search?part=snippet&q=${q}&type=video&videoCategoryId=10&order=viewCount&maxResults=${PER_GENRE}&regionCode=US&relevanceLanguage=${lang}&key=${YOUTUBE_API_KEY}`;
       if (publishedAfter) url += `&publishedAfter=${publishedAfter}`;
-      return fetch(url)
-        .then((r) => {
-          if (!r.ok) {
-            // Non ingoiamo più l'errore in silenzio: lo logghiamo con il motivo esatto
-            // restituito da Google (es. "quotaExceeded", "keyInvalid", "accessNotConfigured")
-            // così in console si vede subito la causa reale invece di dover indovinare.
-            return r.json().catch(() => null).then((body) => {
-              const reason = body?.error?.errors?.[0]?.reason || body?.error?.message || r.status;
-              throw new Error(`YouTube API [${label}] fallita: ${reason}`);
-            });
-          }
-          return r.json();
-        })
+      return fetchJsonWithRetry(url, label)
         .then((data) => {
           const hasNonLatin = (str) => /[\u0900-\u097F\u0980-\u09FF\u0A00-\u0A7F\u0A80-\u0AFF\u0B00-\u0B7F\u0B80-\u0BFF\u0C00-\u0C7F\u0C80-\u0CFF\u0D00-\u0D7F\u0E00-\u0E7F\u0F00-\u0FFF\u1000-\u109F\u1100-\u11FF\u3000-\u9FFF\uA000-\uA48F\uAC00-\uD7AF\uF900-\uFAFF\u3400-\u4DBF]/.test(str);
           const isSpam = (title) => {
@@ -268,7 +294,21 @@ export default function RadioPucciotto() {
         .catch((err) => { console.warn(err.message || err); return []; });
     };
 
-    Promise.all(GENRES.map(fetchSlice))
+    // Le 8 richieste NON partono più tutte insieme: le scaglioniamo di ~300ms l'una
+    // dall'altra. Sparare 8 fetch in un colpo solo (moltiplicato per tutti i visitatori
+    // che aprono la radio nello stesso momento, sulla stessa chiave API) è proprio ciò
+    // che generava le raffiche dietro il rateLimitExceeded (429) osservato in console.
+    const STAGGER_MS = 300;
+    const runStaggered = async (items, fn, ms) => {
+      const promises = [];
+      for (let i = 0; i < items.length; i++) {
+        if (i > 0) await sleep(ms);
+        promises.push(fn(items[i]));
+      }
+      return Promise.all(promises);
+    };
+
+    runStaggered(GENRES, fetchSlice, STAGGER_MS)
       .then((arrays) => {
         const mapped = arrays.flat();
         if (!mapped.length) throw new Error("Nessun brano trovato");
@@ -654,6 +694,17 @@ export default function RadioPucciotto() {
     const isYT = radioTrack && !radioTrack.isCustom;
 
     if (adTrack?.url) {
+      // Rete di sicurezza: uno spot "vero" dura al massimo qualche decina di secondi.
+      // Se il timestamp di partenza è più vecchio di così, non è uno spot in corso ma
+      // un residuo orfano rimasto su Firebase (es. gestionale chiuso a metà spot senza
+      // che onDisconnect facesse in tempo a ripulire) — lo ignoriamo, non lo riproduciamo.
+      const MAX_PLAUSIBLE_SPOT_AGE_S = 90;
+      const age = (Date.now() - (adTrack.startedAt || 0)) / 1000;
+      if (age > MAX_PLAUSIBLE_SPOT_AGE_S) {
+        spotAudio.pause();
+        return;
+      }
+
       wasPlayingBeforeAdRef.current = isPlaying;
       if (isYT) ytPlayerRef.current?.setVolume?.(volume * 50);
       else if (audioRef.current) audioRef.current.volume = volume * 0.5;
