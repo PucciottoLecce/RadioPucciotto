@@ -87,6 +87,7 @@ export default function RadioPucciotto() {
   const lastSpotIndexRef = useRef(-1);
   const audioRef = useRef(null);
   const adAudioRef = useRef(null);
+  const wakeLockRef = useRef(null);
   const ytPlayerRef = useRef(null);
   const [ytReady, setYtReady] = useState(false);
 
@@ -100,6 +101,12 @@ export default function RadioPucciotto() {
   // per non ricaricare/riavviare il player quando l'effetto rigira solo per un
   // cambio di isPlaying (evita i conflitti di riproduzione visti all'avvio)
   const lastPublicTrackKeyRef = useRef(null);
+  // Tiene traccia dell'ultimo "startedAt" già applicato in vista pubblica per il brano
+  // corrente (custom): se il gestionale fa un seek (avanti/indietro) SUL brano stesso,
+  // arriva un nuovo startedAt via Firebase pur restando lo stesso brano — questo ref
+  // permette di distinguere quel caso e riposizionare l'audio, invece di ignorarlo
+  // come un semplice cambio di isPlaying.
+  const lastPublicStartedAtRef = useRef(null);
   // I browser (Safari in particolare) bloccano l'autoplay di un <audio> finché non è
   // stato "sbloccato" da un'interazione utente diretta su QUELL'elemento. Il tag della
   // musica si sblocca quando l'utente preme Play, ma quello degli spot resta bloccato
@@ -462,6 +469,84 @@ export default function RadioPucciotto() {
     ytPlayerRef.current?.setVolume?.(volume * 100);
   }, [volume]);
 
+  // ─── Wake Lock: impedisce che lo schermo si spenga/blocchi per inattività mentre
+  // la radio sta suonando (sia gestionale che ascoltatore). IMPORTANTE: questo NON
+  // impedisce una vera sospensione manuale del PC (coperchio chiuso, "sospendi" dal
+  // menu, spegnimento) — quello è deciso dal sistema operativo e nessun sito web può
+  // evitarlo. Il Wake Lock evita solo lo spegnimento automatico dello schermo per
+  // inattività, che è la causa più comune dell'interruzione ("si spegne lo schermo
+  // e si ferma"). Supportato da Chrome/Edge/Android; su Safari/iOS il supporto è
+  // parziale o assente, in quel caso la richiesta fallisce silenziosamente.
+  useEffect(() => {
+    if (!("wakeLock" in navigator)) return;
+    let cancelled = false;
+
+    const requestWakeLock = async () => {
+      try {
+        const lock = await navigator.wakeLock.request("screen");
+        if (cancelled) { lock.release().catch(() => {}); return; }
+        wakeLockRef.current = lock;
+      } catch (e) {
+        console.warn("Wake Lock non ottenuto:", e.message);
+      }
+    };
+    const releaseWakeLock = () => {
+      if (wakeLockRef.current) {
+        wakeLockRef.current.release().catch(() => {});
+        wakeLockRef.current = null;
+      }
+    };
+
+    if (isPlaying) requestWakeLock();
+    else releaseWakeLock();
+
+    return () => { cancelled = true; };
+  }, [isPlaying]);
+
+  // Il Wake Lock viene rilasciato automaticamente dal browser quando la tab passa in
+  // background (es. l'utente cambia app sul telefono, o minimizza) — se poi torna a
+  // guardare la pagina mentre la radio sta ancora suonando, va richiesto di nuovo.
+  useEffect(() => {
+    if (!("wakeLock" in navigator)) return;
+    const onVisibilityChange = async () => {
+      if (document.visibilityState === "visible" && isPlaying && !wakeLockRef.current) {
+        try { wakeLockRef.current = await navigator.wakeLock.request("screen"); }
+        catch (e) { console.warn("Wake Lock non ottenuto:", e.message); }
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
+  }, [isPlaying]);
+
+  // Media Session: espone titolo/artista e i controlli play-pausa al sistema operativo
+  // (notifica, lock screen, cuffie bluetooth, tasti multimediali). Oltre a essere comodo,
+  // aiuta anche a far percepire al browser/OS la pagina come "riproduzione multimediale
+  // attiva", che su alcuni browser riduce il rischio che una tab in background venga
+  // messa in pausa/limitata per risparmio risorse.
+  useEffect(() => {
+    if (!("mediaSession" in navigator)) return;
+    const track = isGestionale ? current : radioTrack;
+    if (track) {
+      navigator.mediaSession.metadata = new window.MediaMetadata({
+        title: track.title || "Radio Pucciotto",
+        artist: track.artist || "",
+        album: "Radio Pucciotto",
+        artwork: [{ src: "/logo.png", sizes: "512x512", type: "image/png" }],
+      });
+    }
+    navigator.mediaSession.playbackState = isPlaying ? "playing" : "paused";
+  }, [isPlaying, current?.id, radioTrack, isGestionale]);
+
+  useEffect(() => {
+    if (!("mediaSession" in navigator)) return;
+    navigator.mediaSession.setActionHandler("play", () => { unlockAdAudio(); setIsPlaying(true); });
+    navigator.mediaSession.setActionHandler("pause", () => setIsPlaying(false));
+    return () => {
+      navigator.mediaSession.setActionHandler("play", null);
+      navigator.mediaSession.setActionHandler("pause", null);
+    };
+  }, []);
+
   // Quando cambia isPlaying (senza cambiare brano) — SOLO gestionale: qui `current` è la
   // playlist locale che l'admin sta effettivamente pilotando per la trasmissione.
   useEffect(() => {
@@ -568,8 +653,12 @@ export default function RadioPucciotto() {
     }
   };
 
-  // Pubblica il brano corrente su Firebase (solo dal gestionale)
-  const publishNowPlaying = (track) => {
+  // Pubblica il brano corrente su Firebase (solo dal gestionale). elapsedSeconds
+  // permette di ripubblicare lo STESSO brano ma con un punto di partenza diverso
+  // (es. dopo un seek manuale sulla barra di avanzamento): sottraendolo da "ora"
+  // otteniamo uno startedAt tale per cui gli ascoltatori ricalcolano subito la
+  // posizione corretta, invece di restare fermi al punto vecchio.
+  const publishNowPlaying = (track, elapsedSeconds = 0) => {
     if (!track || !isGestionale) return;
     set(ref(db, "nowPlaying"), {
       videoId: track.videoId || null,
@@ -579,7 +668,7 @@ export default function RadioPucciotto() {
       category: track.category,
       color: track.color,
       isCustom: track.isCustom || false,
-      startedAt: Date.now(),
+      startedAt: Date.now() - elapsedSeconds * 1000,
     }).catch((e) => console.warn("Firebase write error:", e));
   };
 
@@ -622,6 +711,25 @@ export default function RadioPucciotto() {
     do { idx = Math.floor(Math.random() * AD_SPOTS.length); } while (idx === lastSpotIndexRef.current);
     lastSpotIndexRef.current = idx;
     return AD_SPOTS[idx];
+  };
+
+  // Sblocca l'<audio> degli spot alla prima interazione utente diretta (click su Play),
+  // sia in vista pubblica sia nel gestionale: senza questo, gli spot innescati in modo
+  // "automatico" (il timer dei 2 minuti, o un evento Firebase) vengono bloccati in
+  // silenzio dal browser perché non sono la diretta conseguenza di un gesto dell'utente.
+  const unlockAdAudio = () => {
+    if (adAudioUnlockedRef.current || !adAudioRef.current) return;
+    adAudioUnlockedRef.current = true;
+    const a = adAudioRef.current;
+    const wasMuted = a.muted;
+    // IMPORTANTE: il tag <audio> degli spot potrebbe non avere ancora una src reale.
+    // Chiamare play() senza sorgente fallisce subito (nessun contenuto da riprodurre) e
+    // lo "sblocco" non avviene davvero. Impostando qui una src reale (uno spot vero),
+    // il play muto va a buon fine e l'elemento resta sbloccato per le riproduzioni future.
+    a.src = AD_SPOTS[0];
+    a.muted = true;
+    a.play().then(() => { a.pause(); a.currentTime = 0; a.muted = wasMuted; })
+      .catch(() => { a.muted = wasMuted; });
   };
 
   const playSpotInBackground = () => {
@@ -675,10 +783,16 @@ export default function RadioPucciotto() {
   // sul brano già selezionato (senza isPlaying nelle dipendenze, il click su Play da solo
   // non ripubblicava nulla se il brano non cambiava — questo è il motivo per cui la radio
   // pubblica restava su "In attesa della diretta...").
+  // lastPublishedTrackIdRef distingue i due casi: un VERO cambio di brano deve ripartire
+  // da 0, ma una semplice ripresa dopo pausa sullo STESSO brano deve mantenere il punto in
+  // cui era rimasto — altrimenti ogni pausa/play del gestore faceva ripartire la canzone
+  // da capo anche per gli ascoltatori, che magari erano avanti di due minuti.
+  const lastPublishedTrackIdRef = useRef(null);
   useEffect(() => {
-    if (isGestionale && current && isPlaying) {
-      publishNowPlaying(current);
-    }
+    if (!isGestionale || !current || !isPlaying) return;
+    const isNewTrack = lastPublishedTrackIdRef.current !== current.id;
+    lastPublishedTrackIdRef.current = current.id;
+    publishNowPlaying(current, isNewTrack ? 0 : progress);
   }, [current?.id, isPlaying, isGestionale]);
 
   // Vista radio pubblica: ascolta Firebase in tempo reale, è l'UNICA fonte del brano in onda.
@@ -689,6 +803,26 @@ export default function RadioPucciotto() {
     const nowPlayingRef = ref(db, "nowPlaying");
     const unsub = onValue(nowPlayingRef, (snapshot) => {
       setRadioTrack(snapshot.val());
+    });
+    return () => unsub();
+  }, [isGestionale]);
+
+  // Il gestionale pubblica il volume degli spot scelto sullo slider, così il
+  // bilanciamento impostato "a orecchio" vale davvero anche per chi ascolta,
+  // non solo per i test locali sul dispositivo del gestore.
+  useEffect(() => {
+    if (!isGestionale) return;
+    set(ref(db, "settings/adVolume"), adVolume).catch((e) => console.warn("Firebase write error:", e));
+  }, [adVolume, isGestionale]);
+
+  // Vista pubblica: riceve il volume spot impostato dal gestionale e lo applica,
+  // al posto del valore di default locale.
+  useEffect(() => {
+    if (isGestionale) return;
+    const adVolumeRef = ref(db, "settings/adVolume");
+    const unsub = onValue(adVolumeRef, (snapshot) => {
+      const v = snapshot.val();
+      if (typeof v === "number") setAdVolume(v);
     });
     return () => unsub();
   }, [isGestionale]);
@@ -709,6 +843,14 @@ export default function RadioPucciotto() {
     if (isGestionale || !adAudioRef.current) return;
     const spotAudio = adAudioRef.current;
     const isYT = radioTrack && !radioTrack.isCustom;
+
+    // Se l'ascoltatore ha messo in pausa, non deve sentire spot che partono da soli:
+    // niente ads mentre l'ascolto è fermo. Se lo spot era già in corso quando ha
+    // premuto pausa, lo fermiamo anche noi qui.
+    if (!isPlaying) {
+      spotAudio.pause();
+      return;
+    }
 
     if (adTrack?.url) {
       // Rete di sicurezza: uno spot "vero" dura al massimo qualche decina di secondi.
@@ -750,7 +892,7 @@ export default function RadioPucciotto() {
       if (isYT) ytPlayerRef.current?.setVolume?.(volume * 100);
       else if (audioRef.current) audioRef.current.volume = volume;
     }
-  }, [adTrack, isGestionale, volume, adVolume, radioTrack]);
+  }, [adTrack, isGestionale, volume, adVolume, radioTrack, isPlaying]);
 
   // Vista radio pubblica: quando arriva/cambia radioTrack, carica il brano giusto
   // (YouTube o file custom) e si posiziona nel punto esatto di trasmissione, sincronizzato.
@@ -770,6 +912,7 @@ export default function RadioPucciotto() {
 
       if (isNewTrack) {
         lastPublicTrackKeyRef.current = trackKey;
+        lastPublicStartedAtRef.current = radioTrack.startedAt;
         // Pause sincrono: stiamo per sostituire subito la sorgente, quindi vogliamo
         // fermare SUBITO il brano precedente (stesso motivo del fix nel gestionale:
         // una pausa "differita" qui rischia di arrivare dopo il caricamento del nuovo
@@ -792,7 +935,16 @@ export default function RadioPucciotto() {
         };
         audioRef.current.addEventListener("loadedmetadata", startPlayback, { once: true });
       } else {
-        // Stesso brano: applica solo lo stato play/pausa richiesto dall'utente
+        // Stesso brano: se lo startedAt è cambiato, il gestionale ha fatto un seek
+        // manuale (avanti/indietro) — riposizioniamo l'audio sul nuovo punto invece
+        // di ignorarlo come un semplice toggle di play/pausa.
+        if (lastPublicStartedAtRef.current !== radioTrack.startedAt) {
+          lastPublicStartedAtRef.current = radioTrack.startedAt;
+          const elapsed = (Date.now() - radioTrack.startedAt) / 1000;
+          if (elapsed >= 0 && elapsed < (audioRef.current.duration || Infinity)) {
+            audioRef.current.currentTime = elapsed;
+          }
+        }
         if (isPlaying) safePlayAudio(audioRef.current).catch(() => {});
         else safePauseAudio(audioRef.current);
       }
@@ -912,24 +1064,7 @@ export default function RadioPucciotto() {
         <div style={{ display: "flex", alignItems: "center", gap: "32px" }}>
           <button
             onClick={() => {
-              // Sblocca l'<audio> degli spot alla prima interazione dell'utente, così
-              // quando arriva un evento "adPlaying" da Firebase il browser lo lascia partire
-              if (!adAudioUnlockedRef.current && adAudioRef.current) {
-                adAudioUnlockedRef.current = true;
-                const a = adAudioRef.current;
-                const wasMuted = a.muted;
-                // IMPORTANTE: il tag <audio> degli spot non ha una src finché non
-                // arriva il primo evento "adPlaying" da Firebase. Chiamare play()
-                // senza sorgente falliva subito (nessun contenuto da riprodurre) e
-                // lo "sblocco" non avveniva davvero: il browser continuava a
-                // bloccare gli spot successivi innescati da Firebase (senza gesto
-                // utente diretto). Impostando qui una src reale (uno spot vero),
-                // il play muto va a buon fine e l'elemento resta sbloccato.
-                a.src = AD_SPOTS[0];
-                a.muted = true;
-                a.play().then(() => { a.pause(); a.currentTime = 0; a.muted = wasMuted; })
-                  .catch(() => { a.muted = wasMuted; });
-              }
+              unlockAdAudio();
               setIsPlaying((p) => !p);
             }}
             disabled={!isLive}
@@ -1092,6 +1227,11 @@ export default function RadioPucciotto() {
                 const t = ((e.clientX - rect.left) / rect.width) * duration;
                 if (current && !current.isCustom) ytPlayerRef.current?.seekTo?.(t, true);
                 else if (audioRef.current) audioRef.current.currentTime = t;
+                setProgress(t);
+                // Senza questo, un seek manuale restava solo locale: gli ascoltatori
+                // continuavano a sentire il brano dal punto vecchio, perché Firebase
+                // veniva aggiornato solo al cambio brano/play, non al semplice avanzamento.
+                if (current) publishNowPlaying(current, t);
               }}>
               <div style={{ height: "100%", width: `${pct}%`, background: RED, transition: "width 0.2s linear" }} />
             </div>
@@ -1112,7 +1252,7 @@ export default function RadioPucciotto() {
               <button className="pc-btn" onClick={goPrev} style={{ background: "transparent", border: "none", color: BLACK, cursor: "pointer", flexShrink: 0 }}>
                 <SkipBack size={22} fill={BLACK} />
               </button>
-              <button className="pc-btn" onClick={() => setIsPlaying((p) => !p)} style={{ width: 56, height: 56, minWidth: 56, minHeight: 56, borderRadius: "50%", background: RED, border: "none", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0 }}>
+              <button className="pc-btn" onClick={() => { unlockAdAudio(); setIsPlaying((p) => !p); }} style={{ width: 56, height: 56, minWidth: 56, minHeight: 56, borderRadius: "50%", background: RED, border: "none", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0 }}>
                 {isPlaying ? <Pause size={24} color={WHITE} fill={WHITE} /> : <Play size={24} color={WHITE} fill={WHITE} />}
               </button>
               <button className="pc-btn" onClick={goNext} style={{ background: "transparent", border: "none", color: BLACK, cursor: "pointer", flexShrink: 0 }}>
