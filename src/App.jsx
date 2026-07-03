@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useMemo } from "react";
-import { Play, Pause, SkipForward, SkipBack, Volume2, Trash2, Shuffle, Music, Check } from "lucide-react";
+import { Play, Pause, SkipForward, SkipBack, Volume2, VolumeX, Trash2, Shuffle, Music, Check } from "lucide-react";
 import { db } from "./firebase.js";
 import { ref, set, onValue, onDisconnect } from "firebase/database";
 
@@ -67,6 +67,11 @@ export default function RadioPucciotto() {
   const [progress, setProgress] = useState(0);
   const [duration, setDuration] = useState(0);
   const [volume, setVolume] = useState(0.8);
+  // Mute generale: a differenza del volume a 0 (che azzera solo il VOLUME dello spot ma
+  // lascia comunque partire l'evento spot, con conseguente interruzione/ducking della
+  // musica), il mute impedisce proprio l'AVVIO dello spot, sia quello ogni 2 minuti sia
+  // quello ogni 3 canzoni. È quello che risolve il "parte uno spot a caso col volume a 0".
+  const [isMuted, setIsMuted] = useState(false);
   // Volume dedicato degli spot pubblicitari, indipendente dal volume generale ma
   // scalato su di esso (vedi calcolo in playSpotInBackground/playSpotSolo/effetto
   // pubblico): a volume generale = 0 anche gli spot devono essere a 0, non più
@@ -84,6 +89,11 @@ export default function RadioPucciotto() {
   // La playlist shuffled è salvata in state, NON ricalcolata ad ogni render
   const [shuffledList, setShuffledList] = useState([]);
 
+  // Ref sincronizzato col mute, usato dentro l'intervallo dei 2 minuti (che di proposito
+  // NON dipende da isMuted, così come già non dipende da volume/adVolume, per non
+  // resettare il countdown ogni volta che il gestore preme mute/smute).
+  const isMutedRef = useRef(false);
+  useEffect(() => { isMutedRef.current = isMuted; }, [isMuted]);
   const lastSpotIndexRef = useRef(-1);
   const audioRef = useRef(null);
   const adAudioRef = useRef(null);
@@ -437,9 +447,20 @@ export default function RadioPucciotto() {
   useEffect(() => { playSpotInBackgroundRef.current = playSpotInBackground; });
   useEffect(() => {
     if (!isGestionale) return;
-    const id = setInterval(() => { if (isPlaying && adEvery2MinEnabled) playSpotInBackgroundRef.current(); }, 120000);
+    const id = setInterval(() => { if (isPlaying && adEvery2MinEnabled && !isMutedRef.current) playSpotInBackgroundRef.current(); }, 120000);
     return () => clearInterval(id);
   }, [isPlaying, adEvery2MinEnabled, isGestionale]);
+
+  // Applica il mute generale agli elementi audio reali: musica (HTML5 o YouTube) e spot.
+  // Questo copre anche l'eventuale spot già in corso nel momento in cui si preme mute.
+  useEffect(() => {
+    if (audioRef.current) audioRef.current.muted = isMuted;
+    if (adAudioRef.current) adAudioRef.current.muted = isMuted;
+    if (ytPlayerRef.current) {
+      if (isMuted) ytPlayerRef.current.mute?.();
+      else ytPlayerRef.current.unMute?.();
+    }
+  }, [isMuted]);
 
   useEffect(() => {
     const id = setInterval(() => setAdLine((a) => (a + 1) % AD_LINES.length), 6000);
@@ -756,7 +777,7 @@ export default function RadioPucciotto() {
   };
 
   const playSpotInBackground = () => {
-    if (!adAudioRef.current) return;
+    if (!adAudioRef.current || isMutedRef.current) return;
     const spotAudio = adAudioRef.current;
     // Se uno spot è già in corso (es. quello "ogni 3 canzoni" partito da pochissimo),
     // non sovrascriverlo: cambiare la sorgente a metà lo taglia bruscamente e lo
@@ -785,7 +806,7 @@ export default function RadioPucciotto() {
   };
 
   const playSpotSolo = () => {
-    if (!adAudioRef.current) return;
+    if (!adAudioRef.current || isMutedRef.current) return;
     const spotAudio = adAudioRef.current;
     // Stesso guard di playSpotInBackground: se c'è già uno spot in corso non lo tagliamo.
     // Controllato PRIMA di mettere in pausa la musica, altrimenti la musica resterebbe
@@ -1287,7 +1308,20 @@ export default function RadioPucciotto() {
           {/* Controlli */}
           <div className="player-controls" style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "20px" }}>
             <div className="vol-control" style={{ display: "flex", alignItems: "center", gap: "10px", flexShrink: 0 }}>
-              <Volume2 size={18} color="#888" />
+              <button
+                onClick={() => setIsMuted((m) => !m)}
+                title={isMuted ? "Riattiva audio" : "Muto generale"}
+                style={{
+                  background: isMuted ? RED : "transparent",
+                  border: isMuted ? "none" : "1px solid rgba(26,26,26,0.15)",
+                  borderRadius: "8px",
+                  width: 30, height: 30, minWidth: 30,
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  cursor: "pointer", flexShrink: 0,
+                }}
+              >
+                {isMuted ? <VolumeX size={16} color={WHITE} /> : <Volume2 size={16} color="#888" />}
+              </button>
               <input type="range" min="0" max="1" step="0.05" value={volume} onChange={(e) => setVolume(parseFloat(e.target.value))} style={{ width: "70px" }} />
             </div>
             <div className="ctrl-spacer" style={{ flex: 1 }} />
