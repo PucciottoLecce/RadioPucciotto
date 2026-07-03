@@ -425,11 +425,21 @@ export default function RadioPucciotto() {
   // playSpotInBackground), così tutti gli ascoltatori lo sentono nello stesso istante.
   // In vista pubblica questo intervallo NON esiste: gli ascoltatori reagiscono solo
   // all'evento "adPlaying" da Firebase (vedi l'effetto più sotto che ascolta adTrack).
+  //
+  // IMPORTANTE: playSpotInBackgroundRef punta sempre all'ultima versione della funzione
+  // (aggiornato ad ogni render, sotto). Questo permette all'intervallo di NON dipendere
+  // da volume/adVolume: se dipendesse da quei valori, ogni volta che il gestore sposta
+  // uno slider (volume generale o volume spot) l'intervallo verrebbe distrutto e
+  // ricreato da capo, azzerando il countdown dei 2 minuti — è esattamente questo che
+  // faceva sembrare lo spot "non partire mai": bastava toccare il volume per farlo
+  // ripartire da zero ogni volta.
+  const playSpotInBackgroundRef = useRef(() => {});
+  useEffect(() => { playSpotInBackgroundRef.current = playSpotInBackground; });
   useEffect(() => {
     if (!isGestionale) return;
-    const id = setInterval(() => { if (isPlaying && adEvery2MinEnabled) playSpotInBackground(); }, 120000);
+    const id = setInterval(() => { if (isPlaying && adEvery2MinEnabled) playSpotInBackgroundRef.current(); }, 120000);
     return () => clearInterval(id);
-  }, [isPlaying, volume, adVolume, adEvery2MinEnabled, isGestionale]);
+  }, [isPlaying, adEvery2MinEnabled, isGestionale]);
 
   useEffect(() => {
     const id = setInterval(() => setAdLine((a) => (a + 1) % AD_LINES.length), 6000);
@@ -546,6 +556,19 @@ export default function RadioPucciotto() {
       navigator.mediaSession.setActionHandler("pause", null);
     };
   }, []);
+
+  // Gestionale: playSpotInBackground/playSpotSolo impostano il volume dello spot UNA
+  // VOLTA SOLA, nel momento in cui parte. Senza questo effetto, se il gestore sposta lo
+  // slider (volume generale o volume spot) MENTRE uno spot sta già suonando, quello
+  // spot resta al volume vecchio finché non finisce — dava l'impressione che il volume
+  // "non funzionasse" perché il cambiamento sembrava non avere alcun effetto immediato.
+  useEffect(() => {
+    if (!isGestionale || !adAudioRef.current) return;
+    const spotAudio = adAudioRef.current;
+    if (!spotAudio.paused && spotAudio.src) {
+      spotAudio.volume = Math.min(1, volume * adVolume);
+    }
+  }, [volume, adVolume, isGestionale]);
 
   // Quando cambia isPlaying (senza cambiare brano) — SOLO gestionale: qui `current` è la
   // playlist locale che l'admin sta effettivamente pilotando per la trasmissione.
@@ -735,6 +758,11 @@ export default function RadioPucciotto() {
   const playSpotInBackground = () => {
     if (!adAudioRef.current) return;
     const spotAudio = adAudioRef.current;
+    // Se uno spot è già in corso (es. quello "ogni 3 canzoni" partito da pochissimo),
+    // non sovrascriverlo: cambiare la sorgente a metà lo taglia bruscamente e lo
+    // ascoltatore sente un salto/troncamento invece dello spot intero. Il prossimo
+    // giro dell'intervallo dei 2 minuti riproverà.
+    if (!spotAudio.paused && spotAudio.src) return;
     const isYT = current && !current.isCustom;
     const originalVolume = volume;
     const spotUrl = pickRandomSpot();
@@ -759,6 +787,10 @@ export default function RadioPucciotto() {
   const playSpotSolo = () => {
     if (!adAudioRef.current) return;
     const spotAudio = adAudioRef.current;
+    // Stesso guard di playSpotInBackground: se c'è già uno spot in corso non lo tagliamo.
+    // Controllato PRIMA di mettere in pausa la musica, altrimenti la musica resterebbe
+    // in pausa senza che parta alcuno spot al posto suo.
+    if (!spotAudio.paused && spotAudio.src) return;
     const isYT = current && !current.isCustom;
     const spotUrl = pickRandomSpot();
     if (isYT) ytPlayerRef.current?.pauseVideo?.();
