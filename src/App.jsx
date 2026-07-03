@@ -842,9 +842,20 @@ export default function RadioPucciotto() {
   // Il gestionale pubblica il volume degli spot scelto sullo slider, così il
   // bilanciamento impostato "a orecchio" vale davvero anche per chi ascolta,
   // non solo per i test locali sul dispositivo del gestore.
+  // IMPORTANTE: prima l'errore veniva solo loggato in console (console.warn), quindi
+  // se le regole del Realtime Database non permettevano la scrittura su "settings/adVolume"
+  // (es. regole che autorizzano esplicitamente solo "nowPlaying" e "adPlaying" ma non
+  // "settings"), il gestore spostava lo slider, l'interfaccia sembrava reagire
+  // normalmente, ma il valore non arrivava MAI a Firebase — e quindi il cliente non
+  // sentiva alcun cambiamento nel bilanciamento spot/musica. Ora l'errore viene mostrato
+  // anche nello stato a video, così il problema è visibile subito invece di restare
+  // silenzioso.
   useEffect(() => {
     if (!isGestionale) return;
-    set(ref(db, "settings/adVolume"), adVolume).catch((e) => console.warn("Firebase write error:", e));
+    set(ref(db, "settings/adVolume"), adVolume).catch((e) => {
+      console.warn("Firebase write error:", e);
+      setStatus("Errore salvataggio volume spot — controlla le regole del Realtime Database (" + e.message + ")");
+    });
   }, [adVolume, isGestionale]);
 
   // Vista pubblica: riceve il volume spot impostato dal gestionale e lo applica,
