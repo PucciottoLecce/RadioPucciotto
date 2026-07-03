@@ -67,10 +67,11 @@ export default function RadioPucciotto() {
   const [progress, setProgress] = useState(0);
   const [duration, setDuration] = useState(0);
   const [volume, setVolume] = useState(0.8);
-  // Mute generale: a differenza del volume a 0 (che azzera solo il VOLUME dello spot ma
-  // lascia comunque partire l'evento spot, con conseguente interruzione/ducking della
-  // musica), il mute impedisce proprio l'AVVIO dello spot, sia quello ogni 2 minuti sia
-  // quello ogni 3 canzoni. È quello che risolve il "parte uno spot a caso col volume a 0".
+  // Mute generale: silenzia SOLO l'ascolto locale nel gestionale (audio.muted sul tag
+  // <audio> e sul player YouTube, vedi effetto dedicato più sotto). NON deve impedire
+  // l'avvio né la pubblicazione su Firebase degli spot (né quello ogni 2 minuti né
+  // quello ogni 3 canzoni): la radio pubblica deve continuare a trasmetterli e a sentirli
+  // normalmente anche se il gestore si è mutato in loco.
   const [isMuted, setIsMuted] = useState(false);
   // Volume dedicato degli spot pubblicitari, indipendente dal volume generale ma
   // scalato su di esso (vedi calcolo in playSpotInBackground/playSpotSolo/effetto
@@ -168,7 +169,26 @@ export default function RadioPucciotto() {
 
   const current = filtered[currentIndex] || filtered[0];
 
-  // Se il gestionale si chiude/ricarica/perde la connessione MENTRE uno spot è in
+  // Vista radio pubblica: precarica in anticipo tutti i file degli spot (invece di
+  // scaricarli solo nel momento in cui arriva l'evento da Firebase). Senza questo,
+  // ogni spot partiva con un ritardo di caricamento variabile (rete/dimensione file),
+  // ritardo che poi la logica di sincronizzazione interpretava come "tempo già
+  // trascorso" e recuperava saltando in avanti — cioè lo spot arrivava tagliato
+  // all'inizio. Precaricando, quando lo spot parte davvero il file è già in cache
+  // del browser e la riproduzione può iniziare quasi istantaneamente.
+  useEffect(() => {
+    if (isGestionale) return;
+    const preloaded = AD_SPOTS.map((url) => {
+      const a = new Audio();
+      a.preload = "auto";
+      a.src = url;
+      a.load();
+      return a;
+    });
+    return () => { preloaded.forEach((a) => { a.src = ""; }); };
+  }, [isGestionale]);
+
+
   // corso, il "pulisci adPlaying alla fine dello spot" (evento "ended") non fa in
   // tempo a scattare, e quello spot resta scritto su Firebase per sempre: i prossimi
   // ascoltatori che si collegano lo trovano ancora lì e lo sentono partire "da solo".
@@ -447,7 +467,11 @@ export default function RadioPucciotto() {
   useEffect(() => { playSpotInBackgroundRef.current = playSpotInBackground; });
   useEffect(() => {
     if (!isGestionale) return;
-    const id = setInterval(() => { if (isPlaying && adEvery2MinEnabled && !isMutedRef.current) playSpotInBackgroundRef.current(); }, 120000);
+    // NOTA: non si controlla isMutedRef qui. Il muto generale del gestionale deve
+    // silenziare SOLO l'ascolto locale (vedi effetto che imposta audio.muted), non
+    // deve impedire allo spot di partire e di essere pubblicato su Firebase: altrimenti
+    // il gestore che si muta in loco spegnerebbe lo spot anche per la radio pubblica.
+    const id = setInterval(() => { if (isPlaying && adEvery2MinEnabled) playSpotInBackgroundRef.current(); }, 120000);
     return () => clearInterval(id);
   }, [isPlaying, adEvery2MinEnabled, isGestionale]);
 
@@ -777,7 +801,10 @@ export default function RadioPucciotto() {
   };
 
   const playSpotInBackground = () => {
-    if (!adAudioRef.current || isMutedRef.current) return;
+    // Niente controllo su isMutedRef: il muto generale del gestionale silenzia solo
+    // l'audio locale (audio.muted, vedi effetto dedicato), non deve impedire allo
+    // spot di partire e di essere pubblicato su Firebase per la radio pubblica.
+    if (!adAudioRef.current) return;
     const spotAudio = adAudioRef.current;
     // Se uno spot è già in corso (es. quello "ogni 3 canzoni" partito da pochissimo),
     // non sovrascriverlo: cambiare la sorgente a metà lo taglia bruscamente e lo
@@ -806,7 +833,9 @@ export default function RadioPucciotto() {
   };
 
   const playSpotSolo = () => {
-    if (!adAudioRef.current || isMutedRef.current) return;
+    // Stesso motivo di playSpotInBackground: il muto locale non deve bloccare la
+    // pubblicazione dello spot per gli ascoltatori della radio pubblica.
+    if (!adAudioRef.current) return;
     const spotAudio = adAudioRef.current;
     // Stesso guard di playSpotInBackground: se c'è già uno spot in corso non lo tagliamo.
     // Controllato PRIMA di mettere in pausa la musica, altrimenti la musica resterebbe
@@ -891,12 +920,24 @@ export default function RadioPucciotto() {
     return () => unsub();
   }, [isGestionale]);
 
-  // Vista radio pubblica: ascolta lo spot in onda pubblicato dal gestionale via Firebase
+  // Vista radio pubblica: ascolta lo spot in onda pubblicato dal gestionale via Firebase.
+  // hasSeenFirstAdSnapshotRef distingue due casi ben diversi:
+  // - il PRIMO snapshot ricevuto dopo il mount può essere uno spot già in corso (la
+  //   pagina si è aperta/ricollegata a metà spot): qui ha senso "recuperare" il punto
+  //   giusto con un seek in avanti.
+  // - tutti gli snapshot SUCCESSIVI, mentre si è già connessi, sono spot che partono
+  //   ORA in diretta: qui il seek NON va fatto, perché l'elapsed calcolato include
+  //   solo latenza di rete/caricamento, non riproduzione reale — applicarlo tagliava
+  //   sistematicamente l'inizio dello spot.
+  const hasSeenFirstAdSnapshotRef = useRef(false);
   useEffect(() => {
     if (isGestionale) return;
     const adPlayingRef = ref(db, "adPlaying");
     const unsub = onValue(adPlayingRef, (snapshot) => {
-      setAdTrack(snapshot.val());
+      const val = snapshot.val();
+      const isLateJoin = !hasSeenFirstAdSnapshotRef.current;
+      hasSeenFirstAdSnapshotRef.current = true;
+      setAdTrack(val ? { ...val, _isLateJoin: isLateJoin } : null);
     });
     return () => unsub();
   }, [isGestionale]);
@@ -938,12 +979,14 @@ export default function RadioPucciotto() {
         spotAudio.load();
       }
       const startSpot = () => {
-        // Il "recupero" del tempo trascorso (per sincronizzarsi con chi si collega a
-        // spot già iniziato) si applica solo oltre una soglia minima: il normale
-        // ritardo di rete/caricamento (qualche centinaio di ms, anche 1s) NON deve far
-        // saltare in avanti l'audio, altrimenti si perdono le prime parole dello spot.
-        const SYNC_THRESHOLD = 1.5; // secondi
-        spotAudio.currentTime = (elapsed > SYNC_THRESHOLD && elapsed < (spotAudio.duration || Infinity)) ? elapsed : 0;
+        // Il "recupero" del tempo trascorso si applica SOLO se questo è il primo
+        // snapshot ricevuto dopo il mount (vero late-join, pagina aperta a spot già
+        // in corso). Per un ascoltatore già connesso che riceve l'evento in diretta,
+        // l'elapsed è solo latenza di rete/caricamento, non riproduzione reale: farlo
+        // partire sempre da 0 evita che lo spot suoni tagliato all'inizio.
+        const SYNC_THRESHOLD = 1.5; // secondi, soglia sotto la quale non si recupera comunque
+        const shouldCatchUp = adTrack._isLateJoin && elapsed > SYNC_THRESHOLD && elapsed < (spotAudio.duration || Infinity);
+        spotAudio.currentTime = shouldCatchUp ? elapsed : 0;
         // Volume dello spot proporzionale al volume generale (niente più +0.2 fisso):
         // a volume generale basso/zero, lo spot deve essere basso/zero anch'esso.
         spotAudio.volume = Math.min(1, volume * adVolume);
