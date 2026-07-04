@@ -83,6 +83,9 @@ export default function RadioPucciotto() {
   // periodico ogni 2 minuti in sottofondo, e quello "solo" ogni 3 canzoni.
   const [adEvery2MinEnabled, setAdEvery2MinEnabled] = useState(true);
   const [adEvery3SongsEnabled, setAdEvery3SongsEnabled] = useState(true);
+  // Minuti configurabili tra uno spot "in sottofondo" e il successivo (prima era
+  // fisso a 2 minuti, non modificabile dal gestionale).
+  const [adIntervalMinutes, setAdIntervalMinutes] = useState(2);
   const [adLine, setAdLine] = useState(0);
   const [playsUntilAd, setPlaysUntilAd] = useState(3);
   const [status, setStatus] = useState("Pronto");
@@ -95,7 +98,18 @@ export default function RadioPucciotto() {
   // resettare il countdown ogni volta che il gestore preme mute/smute).
   const isMutedRef = useRef(false);
   useEffect(() => { isMutedRef.current = isMuted; }, [isMuted]);
+  // Serve al timer degli spot "ogni N minuti": senza questo ref, l'intervallo doveva
+  // avere isPlaying tra le dipendenze e veniva distrutto/ricreato (quindi il conteggio
+  // dei minuti si azzerava) ad ogni singolo play/pausa o cambio canzone.
+  const isPlayingRef = useRef(false);
+  useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
   const lastSpotIndexRef = useRef(-1);
+  // Condiviso tra i due meccanismi (ogni N minuti / ogni 3 canzoni): senza questo,
+  // se scattavano vicini nel tempo gli spot partivano uno dietro l'altro senza pausa
+  // ("all'impazzata"). Impedisce un nuovo spot per almeno MIN_GAP_BETWEEN_ADS_S
+  // secondi dopo la fine dell'ultimo, qualunque sia il meccanismo che lo ha avviato.
+  const lastAdEndedAtRef = useRef(0);
+  const MIN_GAP_BETWEEN_ADS_S = 60;
   const audioRef = useRef(null);
   const adAudioRef = useRef(null);
   const wakeLockRef = useRef(null);
@@ -204,6 +218,17 @@ export default function RadioPucciotto() {
   useEffect(() => {
     if (!isGestionale) return;
     const cleanup = onDisconnect(ref(db, "adPlaying"));
+    cleanup.set(null);
+    return () => { cleanup.cancel(); };
+  }, [isGestionale]);
+
+  // Stessa protezione, ma per "nowPlaying": se il gestionale si disconnette (chiude
+  // la tab, crash, perde la rete) senza aver messo in pausa, il nodo "nowPlaying"
+  // altrimenti resterebbe scritto per sempre con l'ultimo brano trasmesso, e la
+  // vista pubblica continuerebbe a risultare "LIVE" anche se non trasmette più nessuno.
+  useEffect(() => {
+    if (!isGestionale) return;
+    const cleanup = onDisconnect(ref(db, "nowPlaying"));
     cleanup.set(null);
     return () => { cleanup.cancel(); };
   }, [isGestionale]);
@@ -478,9 +503,14 @@ export default function RadioPucciotto() {
     // silenziare SOLO l'ascolto locale (vedi effetto che imposta audio.muted), non
     // deve impedire allo spot di partire e di essere pubblicato su Firebase: altrimenti
     // il gestore che si muta in loco spegnerebbe lo spot anche per la radio pubblica.
-    const id = setInterval(() => { if (isPlaying && adEvery2MinEnabled) playSpotInBackgroundRef.current(); }, 120000);
+    // isPlaying viene letto dal ref (non dalle dipendenze): così l'intervallo NON
+    // viene distrutto/ricreato ad ogni play/pausa/cambio canzone, e il conteggio dei
+    // minuti resta affidabile invece di azzerarsi in continuazione.
+    const id = setInterval(() => {
+      if (isPlayingRef.current && adEvery2MinEnabled) playSpotInBackgroundRef.current();
+    }, Math.max(1, adIntervalMinutes) * 60000);
     return () => clearInterval(id);
-  }, [isPlaying, adEvery2MinEnabled, isGestionale]);
+  }, [adEvery2MinEnabled, adIntervalMinutes, isGestionale]);
 
   // Applica il mute generale agli elementi audio reali: musica (HTML5 o YouTube) e spot.
   // Questo copre anche l'eventuale spot già in corso nel momento in cui si preme mute.
@@ -819,6 +849,9 @@ export default function RadioPucciotto() {
     // ascoltatore sente un salto/troncamento invece dello spot intero. Il prossimo
     // giro dell'intervallo dei 2 minuti riproverà.
     if (!spotAudio.paused && spotAudio.src) return;
+    // Cooldown condiviso: non far partire un altro spot se ne è appena finito uno
+    // (avviato dall'altro meccanismo), anche se ora sono passati i suoi N minuti.
+    if ((Date.now() - lastAdEndedAtRef.current) / 1000 < MIN_GAP_BETWEEN_ADS_S) return;
     const isYT = current && !current.isCustom;
     const originalVolume = volume;
     const spotUrl = pickRandomSpot();
@@ -832,6 +865,7 @@ export default function RadioPucciotto() {
     spotAudio.play().catch((e) => console.warn("Spot bloccato:", e.message));
     publishAdPlaying(spotUrl);
     const restore = () => {
+      lastAdEndedAtRef.current = Date.now();
       if (isYT) ytPlayerRef.current?.setVolume?.(originalVolume * 100);
       else if (audioRef.current) audioRef.current.volume = originalVolume;
       publishAdPlaying(null);
@@ -849,6 +883,8 @@ export default function RadioPucciotto() {
     // Controllato PRIMA di mettere in pausa la musica, altrimenti la musica resterebbe
     // in pausa senza che parta alcuno spot al posto suo.
     if (!spotAudio.paused && spotAudio.src) return;
+    // Stesso cooldown condiviso di playSpotInBackground.
+    if ((Date.now() - lastAdEndedAtRef.current) / 1000 < MIN_GAP_BETWEEN_ADS_S) return;
     const isYT = current && !current.isCustom;
     const spotUrl = pickRandomSpot();
     if (isYT) ytPlayerRef.current?.pauseVideo?.();
@@ -861,6 +897,7 @@ export default function RadioPucciotto() {
     spotAudio.play().catch((e) => console.warn("Spot bloccato:", e.message));
     publishAdPlaying(spotUrl);
     const restore = () => {
+      lastAdEndedAtRef.current = Date.now();
       if (isYT) ytPlayerRef.current?.playVideo?.();
       else audioRef.current?.play().catch(() => {});
       publishAdPlaying(null);
@@ -879,7 +916,14 @@ export default function RadioPucciotto() {
   // da capo anche per gli ascoltatori, che magari erano avanti di due minuti.
   const lastPublishedTrackIdRef = useRef(null);
   useEffect(() => {
-    if (!isGestionale || !current || !isPlaying) return;
+    if (!isGestionale) return;
+    if (!current || !isPlaying) {
+      // Il gestionale è connesso ma non sta trasmettendo (pausa, nessun brano
+      // selezionato): senza questo, "nowPlaying" restava fermo all'ultimo brano
+      // pubblicato e la vista pubblica risultava "LIVE" anche a trasmissione ferma.
+      set(ref(db, "nowPlaying"), null).catch((e) => console.warn("Firebase write error:", e));
+      return;
+    }
     const isNewTrack = lastPublishedTrackIdRef.current !== current.id;
     lastPublishedTrackIdRef.current = current.id;
     publishNowPlaying(current, isNewTrack ? 0 : progress);
@@ -955,7 +999,6 @@ export default function RadioPucciotto() {
   useEffect(() => {
     if (isGestionale || !adAudioRef.current) return;
     const spotAudio = adAudioRef.current;
-    const isYT = radioTrack && !radioTrack.isCustom;
 
     // Se l'ascoltatore ha messo in pausa, non deve sentire spot che partono da soli:
     // niente ads mentre l'ascolto è fermo. Se lo spot era già in corso quando ha
@@ -978,8 +1021,13 @@ export default function RadioPucciotto() {
       }
 
       wasPlayingBeforeAdRef.current = isPlaying;
-      if (isYT) ytPlayerRef.current?.setVolume?.(volume * 50);
-      else if (audioRef.current) audioRef.current.volume = volume * 0.5;
+      // Abbassiamo il volume su ENTRAMBI i player (YT e <audio> locale), non solo su
+      // quello che sembra "in uso" ora: se il gestionale cambia brano (es. da YouTube
+      // a un file custom o viceversa) proprio durante lo spot, al ripristino l'altro
+      // player restava abbassato per sempre, perché il codice si basava sul tipo di
+      // brano DI QUEL momento invece di ripristinare comunque tutto.
+      ytPlayerRef.current?.setVolume?.(volume * 50);
+      if (audioRef.current) audioRef.current.volume = volume * 0.5;
 
       const elapsed = Math.max(0, (Date.now() - (adTrack.startedAt || Date.now())) / 1000);
       if (spotAudio.src !== new URL(adTrack.url, window.location.href).href) {
@@ -1004,8 +1052,8 @@ export default function RadioPucciotto() {
       else spotAudio.addEventListener("loadedmetadata", startSpot, { once: true });
     } else {
       spotAudio.pause();
-      if (isYT) ytPlayerRef.current?.setVolume?.(volume * 100);
-      else if (audioRef.current) audioRef.current.volume = volume;
+      ytPlayerRef.current?.setVolume?.(volume * 100);
+      if (audioRef.current) audioRef.current.volume = volume;
     }
   }, [adTrack, isGestionale, volume, adVolume, radioTrack, isPlaying]);
 
@@ -1403,22 +1451,39 @@ export default function RadioPucciotto() {
 
           {/* Attivazione/disattivazione indipendente dei due meccanismi di spot */}
           <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
-            <div className="cat-pill" onClick={() => setAdEvery2MinEnabled((v) => !v)} style={{
+            <div className="cat-pill" style={{
               padding: "8px 16px", borderRadius: "20px", fontSize: "13px", fontWeight: 600,
               background: adEvery2MinEnabled ? RED : WHITE,
               color: adEvery2MinEnabled ? WHITE : BLACK,
               border: adEvery2MinEnabled ? "none" : "1px solid rgba(26,26,26,0.12)",
               display: "flex", alignItems: "center", gap: "6px",
             }}>
-              <span style={{
-                width: 16, height: 16, borderRadius: "4px", flexShrink: 0,
-                background: adEvery2MinEnabled ? WHITE : "transparent",
-                border: adEvery2MinEnabled ? "none" : "1px solid rgba(26,26,26,0.3)",
-                display: "flex", alignItems: "center", justifyContent: "center",
-              }}>
-                {adEvery2MinEnabled && <Check size={12} color={RED} strokeWidth={3} />}
+              <span onClick={() => setAdEvery2MinEnabled((v) => !v)} style={{ display: "flex", alignItems: "center", gap: "6px", cursor: "pointer" }}>
+                <span style={{
+                  width: 16, height: 16, borderRadius: "4px", flexShrink: 0,
+                  background: adEvery2MinEnabled ? WHITE : "transparent",
+                  border: adEvery2MinEnabled ? "none" : "1px solid rgba(26,26,26,0.3)",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                }}>
+                  {adEvery2MinEnabled && <Check size={12} color={RED} strokeWidth={3} />}
+                </span>
+                Spot ogni
               </span>
-              Spot ogni 2 minuti
+              <input
+                type="number"
+                min="1"
+                max="60"
+                value={adIntervalMinutes}
+                onClick={(e) => e.stopPropagation()}
+                onChange={(e) => setAdIntervalMinutes(Math.max(1, parseInt(e.target.value, 10) || 1))}
+                style={{
+                  width: "40px", textAlign: "center", borderRadius: "8px", border: "none",
+                  fontSize: "13px", fontWeight: 600, padding: "2px 4px",
+                  color: adEvery2MinEnabled ? RED : BLACK,
+                  background: WHITE,
+                }}
+              />
+              min
             </div>
             <div className="cat-pill" onClick={() => setAdEvery3SongsEnabled((v) => !v)} style={{
               padding: "8px 16px", borderRadius: "20px", fontSize: "13px", fontWeight: 600,
