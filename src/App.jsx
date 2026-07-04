@@ -1059,12 +1059,17 @@ export default function RadioPucciotto() {
       }
       lastStartedAdKeyRef.current = adKey;
 
-      const elapsed = Math.max(0, (Date.now() - (adTrack.startedAt || Date.now())) / 1000);
+      lastStartedAdKeyRef.current = adKey;
+
       if (spotAudio.src !== new URL(adTrack.url, window.location.href).href) {
         spotAudio.src = adTrack.url;
         spotAudio.load();
       }
       const startSpot = () => {
+        // Ricalcolato qui (non prima) perché ora si aspetta il buffering (canplay):
+        // usare un valore calcolato troppo presto renderebbe impreciso il recupero
+        // del tempo trascorso per chi si collega a spot già in corso.
+        const elapsed = Math.max(0, (Date.now() - (adTrack.startedAt || Date.now())) / 1000);
         // Il "recupero" del tempo trascorso si applica SOLO se questo è il primo
         // snapshot ricevuto dopo il mount (vero late-join, pagina aperta a spot già
         // in corso). Per un ascoltatore già connesso che riceve l'evento in diretta,
@@ -1078,8 +1083,8 @@ export default function RadioPucciotto() {
         spotAudio.volume = Math.min(1, volume * adVolume);
         spotAudio.play().catch((e) => console.warn("Spot bloccato:", e.message));
       };
-      if (spotAudio.readyState >= 1) startSpot();
-      else spotAudio.addEventListener("loadedmetadata", startSpot, { once: true });
+      if (spotAudio.readyState >= 3) startSpot();
+      else spotAudio.addEventListener("canplay", startSpot, { once: true });
     } else {
       spotAudio.pause();
       ytPlayerRef.current?.setVolume?.(volume * 100);
