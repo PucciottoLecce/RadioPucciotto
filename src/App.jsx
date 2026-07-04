@@ -135,6 +135,13 @@ export default function RadioPucciotto() {
   // la riproduzione appena partita (successo sia nel gestionale che in vista pubblica).
   const suppressPauseRef = useRef(false);
   const suppressPauseTimeoutRef = useRef(null);
+  // Il player YouTube viene creato UNA SOLA VOLTA (vedi effetto con deps [] più sotto),
+  // quindi il suo onStateChange "congela" per sempre la goNext() di quel primissimo
+  // render (playlist di fallback, niente shuffle). Come già fatto per
+  // playSpotInBackgroundRef, teniamo un ref sempre aggiornato con l'ultima versione
+  // di goNext, così l'evento ENDED del player YouTube segue sempre la lista/indice
+  // reali al momento in cui il video finisce, anche in modalità casuale.
+  const goNextRef = useRef(() => {});
   const armSuppressPause = () => {
     suppressPauseRef.current = true;
     if (suppressPauseTimeoutRef.current) clearTimeout(suppressPauseTimeoutRef.current);
@@ -398,7 +405,7 @@ export default function RadioPucciotto() {
             // può far scattare uno spot non sincronizzato e bloccare/disallineare il video.
             if (e.data === window.YT.PlayerState.ENDED) {
               if (isGestionale) {
-                goNext();
+                goNextRef.current();
               } else {
                 // Vista pubblica: se lasciamo il player davvero "fermo" mentre aspettiamo
                 // il prossimo brano da Firebase, il successivo loadVideoById verrebbe
@@ -766,6 +773,7 @@ export default function RadioPucciotto() {
     setProgress(0);
     setIsPlaying(true);
   };
+  useEffect(() => { goNextRef.current = goNext; });
 
   const goPrev = () => {
     setCurrentIndex((i) => (i - 1 + filtered.length) % filtered.length);
