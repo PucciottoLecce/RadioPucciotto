@@ -110,6 +110,10 @@ export default function RadioPucciotto() {
   // secondi dopo la fine dell'ultimo, qualunque sia il meccanismo che lo ha avviato.
   const lastAdEndedAtRef = useRef(0);
   const MIN_GAP_BETWEEN_ADS_S = 60;
+  // Orologio di riferimento per il timer "ogni N minuti": invece di un unico
+  // setTimer lungo (rallentato/ritardato dai browser quando la tab non è in
+  // primo piano), controlliamo spesso se è già passato abbastanza tempo reale.
+  const lastScheduledAdAtRef = useRef(Date.now());
   const audioRef = useRef(null);
   const adAudioRef = useRef(null);
   const wakeLockRef = useRef(null);
@@ -503,12 +507,20 @@ export default function RadioPucciotto() {
     // silenziare SOLO l'ascolto locale (vedi effetto che imposta audio.muted), non
     // deve impedire allo spot di partire e di essere pubblicato su Firebase: altrimenti
     // il gestore che si muta in loco spegnerebbe lo spot anche per la radio pubblica.
-    // isPlaying viene letto dal ref (non dalle dipendenze): così l'intervallo NON
-    // viene distrutto/ricreato ad ogni play/pausa/cambio canzone, e il conteggio dei
-    // minuti resta affidabile invece di azzerarsi in continuazione.
+    // Controlliamo ogni 10 secondi se è già trascorso il tempo impostato, invece di
+    // affidarci a un singolo timer lungo: i browser rallentano/ritardano parecchio i
+    // timer di diversi minuti quando la tab non è in primo piano, mentre un controllo
+    // frequente basato sull'orologio reale (Date.now) recupera subito il ritardo non
+    // appena il browser lo lascia girare di nuovo, invece di perdere lo scatto.
+    lastScheduledAdAtRef.current = Date.now();
     const id = setInterval(() => {
-      if (isPlayingRef.current && adEvery2MinEnabled) playSpotInBackgroundRef.current();
-    }, Math.max(1, adIntervalMinutes) * 60000);
+      if (!isPlayingRef.current || !adEvery2MinEnabled) return;
+      const elapsedMs = Date.now() - lastScheduledAdAtRef.current;
+      if (elapsedMs >= Math.max(1, adIntervalMinutes) * 60000) {
+        lastScheduledAdAtRef.current = Date.now();
+        playSpotInBackgroundRef.current();
+      }
+    }, 10000);
     return () => clearInterval(id);
   }, [adEvery2MinEnabled, adIntervalMinutes, isGestionale]);
 
@@ -982,6 +994,11 @@ export default function RadioPucciotto() {
   //   solo latenza di rete/caricamento, non riproduzione reale — applicarlo tagliava
   //   sistematicamente l'inizio dello spot.
   const hasSeenFirstAdSnapshotRef = useRef(false);
+  // Ricorda QUALE spot (url + istante di partenza) è già stato avviato: senza questo,
+  // ogni volta che l'effetto si riattivava per un motivo estraneo (es. il gestionale
+  // tocca lo slider "Volume spot" durante lo spot stesso) lo spot ripartiva da capo
+  // per tutti gli ascoltatori, invece di continuare da dove era arrivato.
+  const lastStartedAdKeyRef = useRef(null);
   useEffect(() => {
     if (isGestionale) return;
     const adPlayingRef = ref(db, "adPlaying");
@@ -1029,6 +1046,19 @@ export default function RadioPucciotto() {
       ytPlayerRef.current?.setVolume?.(volume * 50);
       if (audioRef.current) audioRef.current.volume = volume * 0.5;
 
+      // Identifica IL preciso spot in onda (url + istante di partenza): se è lo
+      // stesso di prima, l'effetto si sta solo riattivando per un motivo estraneo
+      // (es. volume/adVolume cambiati) e non deve far ripartire l'audio da capo,
+      // deve solo aggiornarne il volume.
+      const adKey = adTrack.url + "|" + (adTrack.startedAt || 0);
+      const isNewAdInstance = lastStartedAdKeyRef.current !== adKey;
+
+      if (!isNewAdInstance) {
+        spotAudio.volume = Math.min(1, volume * adVolume);
+        return;
+      }
+      lastStartedAdKeyRef.current = adKey;
+
       const elapsed = Math.max(0, (Date.now() - (adTrack.startedAt || Date.now())) / 1000);
       if (spotAudio.src !== new URL(adTrack.url, window.location.href).href) {
         spotAudio.src = adTrack.url;
@@ -1054,6 +1084,7 @@ export default function RadioPucciotto() {
       spotAudio.pause();
       ytPlayerRef.current?.setVolume?.(volume * 100);
       if (audioRef.current) audioRef.current.volume = volume;
+      lastStartedAdKeyRef.current = null;
     }
   }, [adTrack, isGestionale, volume, adVolume, radioTrack, isPlaying]);
 
