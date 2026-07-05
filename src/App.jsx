@@ -144,6 +144,14 @@ export default function RadioPucciotto() {
   const lastScheduledAdAtRef = useRef(Date.now());
   const audioRef = useRef(null);
   const adAudioRef = useRef(null);
+  // Web Audio per gli SPOT lato ascoltatore: a differenza di un tag <audio>, l'audio
+  // riprodotto via Web Audio NON viene messo in pausa dal "risparmio energia" del browser
+  // quando la scheda è in background — che è la causa degli spot "a spezzoni" per chi
+  // ascolta a scheda minimizzata.
+  const audioCtxRef = useRef(null);
+  const spotBuffersRef = useRef({});   // url -> AudioBuffer decodificato
+  const spotSourceRef = useRef(null);  // sorgente Web Audio dello spot in corso
+  const spotGainRef = useRef(null);    // nodo volume dello spot in corso
   const wakeLockRef = useRef(null);
   // "Ancora audio" per il gestionale: un audio nativo reale (non nell'iframe
   // YouTube) che suona in loop, quasi impercettibile, mentre si è on air. Il player
@@ -548,6 +556,12 @@ export default function RadioPucciotto() {
         events: {
           onReady: () => { ytPlayerRef.current.setVolume(volume * 100); setYtReady(true); },
           onStateChange: (e) => {
+            // ─── DIAGNOSTICA (temporanea): stampa in console ogni cambio di stato del
+            // player, con l'orario. Serve a capire dal vivo cosa causa i "spezzoni".
+            if (isGestionale) {
+              const N = { "-1": "NON AVVIATO", 0: "FINITO", 1: "IN RIPRODUZIONE", 2: "PAUSA", 3: "BUFFERING", 5: "IN CODA" };
+              console.log("🔴 RP stato:", N[e.data] ?? e.data, "—", new Date().toLocaleTimeString());
+            }
             // goNext() (avanzamento al brano successivo) deve girare SOLO nel gestionale:
             // in vista pubblica l'avanzamento è governato da Firebase, non dalla fine del
             // video locale, altrimenti si disallineerebbe la trasmissione.
@@ -589,17 +603,16 @@ export default function RadioPucciotto() {
               }
             }
             if (e.data === window.YT.PlayerState.PAUSED && !keepAliveLoopRef.current && !suppressPauseRef.current) {
-              // Nel gestionale la radio NON deve MAI fermarsi da sola: l'unica pausa
-              // legittima è quella richiesta dall'utente col pulsante (che imposta
-              // isPlaying=false PRIMA di far pausare il player, quindi qui isPlayingRef
-              // è già false e cadiamo nel ramo else, innocuo). Se invece arriva un PAUSED
-              // mentre l'intento è ancora "in riproduzione", è una pausa "fantasma" del
-              // browser (throttling della scheda in background, transizioni dell'iframe):
-              // la ignoriamo e, se siamo in primo piano, riprendiamo subito. In background
-              // non insistiamo qui per non entrare in un ping-pong col browser — ci pensa
-              // il gestore di visibilitychange a riprendere appena la scheda torna visibile.
-              if (isGestionale && isPlayingRef.current) {
-                if (document.visibilityState === "visible") ytPlayerRef.current?.playVideo?.();
+              if (isGestionale) {
+                // Gestionale: l'unica pausa VERA è quella del pulsante, che imposta
+                // isPlaying=false PRIMA di pausare il player (quindi qui isPlayingRef è già
+                // false). Se invece isPlayingRef è ancora true, è un PAUSED "spurio"
+                // (buffering, transizione, pubblicità YouTube, throttling della scheda):
+                // lo IGNORIAMO del tutto. Prima qui chiamavo playVideo() per "recuperare",
+                // ma se il player stava solo bufferando quel play ripetuto causava lo
+                // stutter "a spezzoni". Al ritorno in primo piano ci pensa il gestore di
+                // visibilitychange a riprendere; per un buffering, YouTube riparte da solo.
+                if (!isPlayingRef.current) setStatus("In pausa");
               } else {
                 setStatus("In pausa");
                 setIsPlaying(false);
@@ -612,8 +625,9 @@ export default function RadioPucciotto() {
           // una serie di video non incorporabili di fila fa saltare tutta la playlist a
           // raffica, senza mai suonare né sul gestionale né sulla radio ("non segue
           // l'ordine, si ferma e ricomincia, non si sente nulla").
-          onError: () => {
+          onError: (e) => {
             if (!isGestionale) return;
+            console.log("🔴 RP errore video, codice:", e?.data, "— (101/150 = embed disabilitato, 100 = rimosso, 2/5 = id/player)");
             const now = Date.now();
             // Errori entro 12s l'uno dall'altro = "raffica": li contiamo. Errori isolati
             // (>12s) ripartono da 1, così un video morto ogni tanto si salta senza problemi.
@@ -807,21 +821,9 @@ export default function RadioPucciotto() {
       } else if (audioRef.current && audioRef.current.paused) {
         safePlayAudio(audioRef.current).catch(() => {});
       }
-      // Ri-sincronizza gli ascoltatori alla posizione REALE del gestionale. Se in
-      // background YouTube ha congelato la riproduzione, gli ascoltatori (che calcolano la
-      // posizione da startedAt) sono andati AVANTI: "anticipavano" la trasmissione. Qui
-      // ripubblichiamo il brano corrente col punto effettivo in cui si trova il gestionale,
-      // così tutti si riallineano invece di restare sfasati. Rimandato di poco perché
-      // getCurrentTime, subito dopo playVideo(), può non essere ancora aggiornato.
-      setTimeout(() => {
-        if (!isPlayingRef.current) return;
-        const cur = currentRef.current;
-        if (!cur) return;
-        const t = cur.isCustom
-          ? (audioRef.current?.currentTime || 0)
-          : (ytPlayerRef.current?.getCurrentTime?.() || 0);
-        if (t > 0) publishNowPlaying(cur, t);
-      }, 600);
+      // (Rimossa) la ripubblicazione della posizione al ritorno in primo piano: era una
+      // modifica speculativa che aggiungeva scritture su Firebase senza un beneficio
+      // chiaro. Il riallineamento resta gestito dalla soglia anti-salto lato ascoltatore.
     };
     document.addEventListener("visibilitychange", onVis);
     return () => document.removeEventListener("visibilitychange", onVis);
@@ -1059,7 +1061,66 @@ export default function RadioPucciotto() {
   // sia in vista pubblica sia nel gestionale: senza questo, gli spot innescati in modo
   // "automatico" (il timer dei 2 minuti, o un evento Firebase) vengono bloccati in
   // silenzio dal browser perché non sono la diretta conseguenza di un gesto dell'utente.
+  // ─── Web Audio per gli spot (ascoltatore) ────────────────────────────────
+  const getAudioCtx = () => {
+    if (!audioCtxRef.current) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (AC) { try { audioCtxRef.current = new AC(); } catch (_) { audioCtxRef.current = null; } }
+    }
+    return audioCtxRef.current;
+  };
+  // Scarica e DECODIFICA uno spot in un AudioBuffer (cachato). Usa la forma con callback di
+  // decodeAudioData per compatibilità anche con Safari più vecchi.
+  const loadSpotBuffer = (url) => {
+    const ctx = getAudioCtx();
+    if (!ctx) return Promise.resolve(null);
+    if (spotBuffersRef.current[url]) return Promise.resolve(spotBuffersRef.current[url]);
+    return fetch(url)
+      .then((r) => r.arrayBuffer())
+      .then((ab) => new Promise((res) => {
+        ctx.decodeAudioData(ab, (buf) => { spotBuffersRef.current[url] = buf; res(buf); }, () => res(null));
+      }))
+      .catch(() => null);
+  };
+  const stopSpotWA = () => {
+    if (spotSourceRef.current) {
+      try { spotSourceRef.current.onended = null; spotSourceRef.current.stop(); } catch (_) {}
+      spotSourceRef.current = null;
+    }
+    spotGainRef.current = null;
+  };
+  // Avvia uno spot via Web Audio. Ritorna true se è partito, false se non è possibile
+  // (così l'effetto ricade sul tag <audio>). onended viene chiamato a fine spot.
+  const playSpotWA = (url, vol, onended) => {
+    const ctx = getAudioCtx();
+    if (!ctx) return Promise.resolve(false);
+    const kick = ctx.state === "suspended" ? ctx.resume().catch(() => {}) : Promise.resolve();
+    return kick.then(() => loadSpotBuffer(url)).then((buf) => {
+      if (!buf) return false;
+      stopSpotWA();
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      const gain = ctx.createGain();
+      gain.gain.value = Math.max(0, Math.min(1, vol));
+      src.connect(gain).connect(ctx.destination);
+      src.onended = () => { if (spotSourceRef.current === src) spotSourceRef.current = null; onended && onended(); };
+      try { src.start(0); } catch (_) { return false; }
+      spotSourceRef.current = src;
+      spotGainRef.current = gain;
+      return true;
+    }).catch(() => false);
+  };
+
   const unlockAdAudio = () => {
+    // Web Audio: al primo gesto utente (click su Play) sblocca/riprende il contesto e
+    // precarica gli spot dell'ascoltatore, così poi suonano subito e restano vivi anche a
+    // scheda in background. Fatto SEMPRE, anche se lo sblocco del tag <audio> qui sotto è
+    // già avvenuto.
+    const ctx = getAudioCtx();
+    if (ctx) {
+      if (ctx.state === "suspended") ctx.resume().catch(() => {});
+      if (!isGestionale) AD_SPOTS.forEach((u) => loadSpotBuffer(u));
+    }
     if (adAudioUnlockedRef.current || !adAudioRef.current) return;
     adAudioUnlockedRef.current = true;
     const a = adAudioRef.current;
@@ -1213,6 +1274,23 @@ export default function RadioPucciotto() {
     return () => unsub();
   }, [isGestionale]);
 
+  // DIAGNOSTICA (temporanea): traccia gli eventi dell'audio dello SPOT, per capire perché
+  // gli spot vanno "a spezzoni". Legenda: waiting/stalled/suspend = buffering o problema
+  // di rete/file; coppie pause→play = qualcosa lo ferma e lo fa ripartire; error = il file
+  // dello spot non si carica; seeking/emptied = la sorgente viene cambiata o riavvolta.
+  useEffect(() => {
+    const a = adAudioRef.current;
+    if (!a) return;
+    const stamp = () => `${a.currentTime.toFixed(1)}s/${isFinite(a.duration) ? a.duration.toFixed(1) : "?"}s`;
+    const names = ["loadstart", "play", "playing", "pause", "waiting", "stalled", "suspend", "ended", "error", "seeking", "emptied"];
+    const hs = names.map((n) => {
+      const h = () => console.log("🟡 RP spot:", n, stamp(), new Date().toLocaleTimeString());
+      a.addEventListener(n, h);
+      return [n, h];
+    });
+    return () => hs.forEach(([n, h]) => a.removeEventListener(n, h));
+  }, []);
+
   // Vista radio pubblica: gestione dello spot, riscritta SEMPLICE e INDIPENDENTE.
   // Lo spot è un overlay a sé: parte sempre dall'inizio, suona fino alla fine, e la sua
   // riproduzione NON viene più disturbata dai cambi di canzone (per questo l'effetto non
@@ -1223,12 +1301,16 @@ export default function RadioPucciotto() {
   // rialziamo. Il volume della musica passa SEMPRE da applyMusicVolume, che tiene conto
   // del ducking, così un cambio canzone durante lo spot non riporta la musica a tutto volume.
   useEffect(() => {
-    if (isGestionale || !adAudioRef.current) return;
+    if (isGestionale) return;
     const spotAudio = adAudioRef.current;
+    const stopEverything = () => {
+      stopSpotWA();
+      if (spotAudio) spotAudio.pause();
+    };
 
     // Ascoltatore in pausa: niente spot, e la musica non va abbassata.
     if (!isPlaying) {
-      spotAudio.pause();
+      stopEverything();
       isDuckingRef.current = false;
       applyMusicVolume();
       return;
@@ -1241,32 +1323,44 @@ export default function RadioPucciotto() {
       // assicurati che la musica non resti abbassata.
       const age = (Date.now() - (adTrack.startedAt || 0)) / 1000;
       if (age > 90 || finishedAdKeyRef.current === adKey) {
-        spotAudio.pause();
+        stopEverything();
         isDuckingRef.current = false;
         applyMusicVolume();
         return;
       }
 
-      // Durante lo spot la musica va SEMPRE abbassata; aggiorna anche il volume dello
-      // spot se nel frattempo si sposta uno slider.
+      // Durante lo spot la musica va SEMPRE abbassata; aggiorna anche il volume dello spot
+      // (Web Audio o <audio>) se nel frattempo si sposta uno slider.
       isDuckingRef.current = true;
       applyMusicVolume();
-      spotAudio.volume = Math.min(1, volume * adVolume);
+      const vol = Math.min(1, volume * adVolume);
+      if (spotGainRef.current) spotGainRef.current.gain.value = vol;
+      if (spotAudio && !spotAudio.paused) spotAudio.volume = vol;
 
-      // Stesso spot già avviato: aggiorna solo il volume (sopra) e NON ripartire da capo.
+      // Stesso spot già avviato: solo aggiornamento volume (sopra), niente riavvio.
       if (lastStartedAdKeyRef.current === adKey) return;
       lastStartedAdKeyRef.current = adKey;
 
-      // Nuovo spot: parti SEMPRE da 0 (niente "recupero tempo" che tagliava l'inizio).
-      if (spotAudio.src !== new URL(adTrack.url, window.location.href).href) {
-        spotAudio.src = adTrack.url;
-      }
-      spotAudio.currentTime = 0;
-      spotAudio.play().catch((e) => console.warn("Spot bloccato:", e.message));
+      const onEnd = () => {
+        finishedAdKeyRef.current = adKey;
+        isDuckingRef.current = false;
+        applyMusicVolume();
+      };
+
+      // PRIMA scelta: Web Audio (suona anche a scheda in background, niente "power saving"
+      // che lo mette in pausa). Se non è possibile (browser vecchio, decodifica fallita),
+      // FALLBACK al tag <audio> come prima.
+      playSpotWA(adTrack.url, vol, onEnd).then((ok) => {
+        if (ok || !spotAudio) return;
+        if (spotAudio.src !== new URL(adTrack.url, window.location.href).href) spotAudio.src = adTrack.url;
+        spotAudio.currentTime = 0;
+        spotAudio.volume = vol;
+        spotAudio.play().catch((e) => console.warn("Spot bloccato:", e.message));
+      });
     } else {
       lastStartedAdKeyRef.current = null;
       finishedAdKeyRef.current = null;
-      spotAudio.pause();
+      stopEverything();
       isDuckingRef.current = false;
       applyMusicVolume();
     }
