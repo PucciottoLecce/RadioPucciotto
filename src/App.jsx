@@ -120,6 +120,11 @@ export default function RadioPucciotto() {
   // Id del timeout di sicurezza dello spot in corso (vedi armSpotRestore).
   const spotSafetyTimerRef = useRef(null);
   const lastSpotIndexRef = useRef(-1);
+  // Contatore degli errori YouTube consecutivi (video non incorporabili/rimossi): serve a
+  // frenare l'auto-skip, altrimenti una serie di video "morti" fa saltare tutta la
+  // playlist a raffica senza mai suonare.
+  const ytErrorCountRef = useRef(0);
+  const ytLastErrorAtRef = useRef(0);
   // Condiviso tra i due meccanismi (ogni N minuti / ogni 3 canzoni): senza questo,
   // se scattavano vicini nel tempo gli spot partivano uno dietro l'altro senza pausa
   // ("all'impazzata"). Impedisce un nuovo spot per almeno MIN_GAP_BETWEEN_ADS_S
@@ -358,10 +363,16 @@ export default function RadioPucciotto() {
   }, []);
 
   // Carica automaticamente i brani per genere da YouTube Data API v3.
-  // Risultati cachati in localStorage per 4 ore per non consumare quota Google.
+  // Risultati cachati in localStorage per 18 ore per non consumare quota Google.
   // Ad ogni scadenza alterna casualmente tra "più ascoltati del momento" (ultimo anno)
   // e "più ascoltati di sempre" (tutti i tempi, ordinati per view totali).
   useEffect(() => {
+    // SOLO il gestionale interroga l'API YouTube: è l'unico che deve scegliere i brani.
+    // Gli ascoltatori ricevono TUTTO da Firebase (brano + spot) e non usano affatto questa
+    // lista, quindi non devono consumare quota. Prima invece OGNI visitatore faceva 8
+    // ricerche: con la chiave condivisa era la causa principale dell'esaurimento rapido
+    // della quota giornaliera ("Search Queries per day" al 100%).
+    if (!isGestionale) { setLoadingTracks(false); return; }
     if (!YOUTUBE_API_KEY) {
       setLoadError("Imposta VITE_YOUTUBE_API_KEY nelle variabili Cloudflare. Uso playlist di riserva.");
       setLoadingTracks(false);
@@ -561,6 +572,18 @@ export default function RadioPucciotto() {
               if (keepAliveLoopRef.current) {
                 keepAliveLoopRef.current = false; // consumato: era solo il loop di attesa
               } else {
+                ytErrorCountRef.current = 0; // un brano è partito davvero: azzera il freno anti-raffica
+                // RETE DI SICUREZZA (radio pubblica): ogni volta che parte un brano VERO,
+                // forziamo lo smuto del player. Tra un brano e l'altro il player viene
+                // messo in loop MUTO d'attesa (vedi ENDED sopra); se per una qualsiasi
+                // sovrapposizione di eventi quel muto non veniva tolto, il brano nuovo
+                // ripartiva senza audio (e la scheda non mostrava più l'icona altoparlante).
+                // Qui lo togliamo sempre. Nel gestionale NON lo facciamo, per non
+                // scavalcare il pulsante "Muto generale".
+                if (!isGestionale) {
+                  ytPlayerRef.current?.unMute?.();
+                  applyMusicVolume(); // rispetta il ducking se c'è uno spot in corso
+                }
                 setStatus("In riproduzione");
                 setIsPlaying(true);
               }
@@ -583,14 +606,28 @@ export default function RadioPucciotto() {
               }
             }
           },
-          // Video non riproducibile (rimosso, privato, bloccato per regione, embed
-          // disabilitato...): nel gestionale non restiamo bloccati sul brano morto,
-          // passiamo automaticamente al successivo invece di piantare la trasmissione.
+          // Video non riproducibile: errori YouTube tipici 101/150 (embed disabilitato dal
+          // proprietario — FREQUENTE sui video musicali ufficiali), 100 (rimosso/privato),
+          // 2/5 (id/player non validi). Passiamo al successivo, ma CON UN FRENO: senza,
+          // una serie di video non incorporabili di fila fa saltare tutta la playlist a
+          // raffica, senza mai suonare né sul gestionale né sulla radio ("non segue
+          // l'ordine, si ferma e ricomincia, non si sente nulla").
           onError: () => {
-            if (isGestionale) {
-              setStatus("Video non disponibile, passo al prossimo");
-              goNextRef.current();
+            if (!isGestionale) return;
+            const now = Date.now();
+            // Errori entro 12s l'uno dall'altro = "raffica": li contiamo. Errori isolati
+            // (>12s) ripartono da 1, così un video morto ogni tanto si salta senza problemi.
+            ytErrorCountRef.current = (now - ytLastErrorAtRef.current < 12000) ? ytErrorCountRef.current + 1 : 1;
+            ytLastErrorAtRef.current = now;
+            if (ytErrorCountRef.current > 5) {
+              // Troppi brani non incorporabili di fila: ci fermiamo invece di raffichare.
+              setStatus("Diversi brani non sono incorporabili da YouTube — in pausa. Prova a cambiare categoria o a ricaricare.");
+              setIsPlaying(false);
+              return;
             }
+            setStatus("Brano non disponibile, passo al prossimo…");
+            // Piccolo ritardo: niente loop stretto, e diamo respiro all'iframe.
+            setTimeout(() => { goNextRef.current(); }, 700);
           },
         },
       });
@@ -770,6 +807,21 @@ export default function RadioPucciotto() {
       } else if (audioRef.current && audioRef.current.paused) {
         safePlayAudio(audioRef.current).catch(() => {});
       }
+      // Ri-sincronizza gli ascoltatori alla posizione REALE del gestionale. Se in
+      // background YouTube ha congelato la riproduzione, gli ascoltatori (che calcolano la
+      // posizione da startedAt) sono andati AVANTI: "anticipavano" la trasmissione. Qui
+      // ripubblichiamo il brano corrente col punto effettivo in cui si trova il gestionale,
+      // così tutti si riallineano invece di restare sfasati. Rimandato di poco perché
+      // getCurrentTime, subito dopo playVideo(), può non essere ancora aggiornato.
+      setTimeout(() => {
+        if (!isPlayingRef.current) return;
+        const cur = currentRef.current;
+        if (!cur) return;
+        const t = cur.isCustom
+          ? (audioRef.current?.currentTime || 0)
+          : (ytPlayerRef.current?.getCurrentTime?.() || 0);
+        if (t > 0) publishNowPlaying(cur, t);
+      }, 600);
     };
     document.addEventListener("visibilitychange", onVis);
     return () => document.removeEventListener("visibilitychange", onVis);
@@ -1161,109 +1213,56 @@ export default function RadioPucciotto() {
     return () => unsub();
   }, [isGestionale]);
 
-  // Vista radio pubblica: quando arriva/finisce uno spot, abbassa/ripristina il volume
-  // della canzone in corso e riproduce/interrompe lo spot in sincrono col gestionale
+  // Vista radio pubblica: gestione dello spot, riscritta SEMPLICE e INDIPENDENTE.
+  // Lo spot è un overlay a sé: parte sempre dall'inizio, suona fino alla fine, e la sua
+  // riproduzione NON viene più disturbata dai cambi di canzone (per questo l'effetto non
+  // dipende più da radioTrack). Rimosse le due fonti dei bug segnalati: il "recupero
+  // tempo" (shouldCatchUp) che faceva partire lo spot a metà, e il riavvio automatico su
+  // pausa imprevista che lo faceva fermare-e-ricominciare. Qui decidiamo solo: se c'è uno
+  // spot nuovo lo avviamo da 0 e abbassiamo la musica; se non c'è (o è finito) la
+  // rialziamo. Il volume della musica passa SEMPRE da applyMusicVolume, che tiene conto
+  // del ducking, così un cambio canzone durante lo spot non riporta la musica a tutto volume.
   useEffect(() => {
     if (isGestionale || !adAudioRef.current) return;
     const spotAudio = adAudioRef.current;
 
-    // Se l'ascoltatore ha messo in pausa, non deve sentire spot che partono da soli:
-    // niente ads mentre l'ascolto è fermo. Se lo spot era già in corso quando ha
-    // premuto pausa, lo fermiamo anche noi qui.
+    // Ascoltatore in pausa: niente spot, e la musica non va abbassata.
     if (!isPlaying) {
       spotAudio.pause();
+      isDuckingRef.current = false;
+      applyMusicVolume();
       return;
     }
 
     if (adTrack?.url) {
-      // Rete di sicurezza: uno spot "vero" dura al massimo qualche decina di secondi.
-      // Se il timestamp di partenza è più vecchio di così, non è uno spot in corso ma
-      // un residuo orfano rimasto su Firebase (es. gestionale chiuso a metà spot senza
-      // che onDisconnect facesse in tempo a ripulire) — lo ignoriamo, non lo riproduciamo.
-      const MAX_PLAUSIBLE_SPOT_AGE_S = 90;
-      const age = (Date.now() - (adTrack.startedAt || 0)) / 1000;
-      if (age > MAX_PLAUSIBLE_SPOT_AGE_S) {
-        // Residuo orfano: oltre a non riprodurlo, ci assicuriamo che la musica NON resti
-        // abbassata (se un ducking era attivo lo togliamo), altrimenti un vecchio spot mai
-        // ripulito lascerebbe l'ascoltatore col volume tagliato per sempre.
-        spotAudio.pause();
-        lastStartedAdKeyRef.current = null;
-        isDuckingRef.current = false;
-        applyMusicVolume();
-        return;
-      }
-
-      // Identifica IL preciso spot in onda (url + istante di partenza).
       const adKey = adTrack.url + "|" + (adTrack.startedAt || 0);
 
-      // Se questo esatto spot è GIÀ finito localmente ma su Firebase è ancora presente
-      // (il null di fine non è ancora arrivato, o non arriverà mai perché il gestionale
-      // è caduto), non rimetterlo in play e non ri-abbassare la musica: teniamo la musica
-      // a volume pieno e usciamo.
-      if (finishedAdKeyRef.current === adKey) {
+      // Residuo orfano su Firebase (gestionale caduto a metà spot): non riprodurlo e
+      // assicurati che la musica non resti abbassata.
+      const age = (Date.now() - (adTrack.startedAt || 0)) / 1000;
+      if (age > 90 || finishedAdKeyRef.current === adKey) {
         spotAudio.pause();
         isDuckingRef.current = false;
         applyMusicVolume();
         return;
       }
 
-      wasPlayingBeforeAdRef.current = isPlaying;
-      // Abbassiamo la musica (ducking) tramite applyMusicVolume: agisce su ENTRAMBI i
-      // player (YT e <audio> locale), così se il gestionale cambia tipo di brano durante
-      // lo spot nessuno dei due resta abbassato. isDuckingRef fa sì che anche spostando lo
-      // slider durante lo spot la musica resti abbassata.
+      // Durante lo spot la musica va SEMPRE abbassata; aggiorna anche il volume dello
+      // spot se nel frattempo si sposta uno slider.
       isDuckingRef.current = true;
       applyMusicVolume();
+      spotAudio.volume = Math.min(1, volume * adVolume);
 
-      // Se è lo stesso spot di prima, l'effetto si sta solo riattivando per un motivo
-      // estraneo (es. volume/adVolume cambiati) e non deve far ripartire l'audio da capo,
-      // deve solo aggiornarne il volume.
-      const isNewAdInstance = lastStartedAdKeyRef.current !== adKey;
-
-      if (!isNewAdInstance) {
-        spotAudio.volume = Math.min(1, volume * adVolume);
-        // Se per qualche motivo si era fermato (buffering momentaneo, tab in
-        // background, ecc.) lo riprendiamo dal punto esatto in cui era, SENZA
-        // riavvolgerlo: prima questo ramo si limitava ad aggiornare il volume e
-        // basta, quindi se lo spot restava fermo non ripartiva mai più da solo.
-        if (spotAudio.paused) spotAudio.play().catch(() => {});
-        return;
-      }
+      // Stesso spot già avviato: aggiorna solo il volume (sopra) e NON ripartire da capo.
+      if (lastStartedAdKeyRef.current === adKey) return;
       lastStartedAdKeyRef.current = adKey;
 
+      // Nuovo spot: parti SEMPRE da 0 (niente "recupero tempo" che tagliava l'inizio).
       if (spotAudio.src !== new URL(adTrack.url, window.location.href).href) {
         spotAudio.src = adTrack.url;
-        spotAudio.load();
       }
-      const startSpot = () => {
-        // Ricalcolato qui (non prima) perché ora si aspetta il buffering (canplay):
-        // usare un valore calcolato troppo presto renderebbe impreciso il recupero
-        // del tempo trascorso per chi si collega a spot già in corso.
-        const elapsed = Math.max(0, (Date.now() - (adTrack.startedAt || Date.now())) / 1000);
-        // Il "recupero" del tempo trascorso si applica SOLO se questo è il primo
-        // snapshot ricevuto dopo il mount (vero late-join, pagina aperta a spot già
-        // in corso). Per un ascoltatore già connesso che riceve l'evento in diretta,
-        // l'elapsed è solo latenza di rete/caricamento, non riproduzione reale: farlo
-        // partire sempre da 0 evita che lo spot suoni tagliato all'inizio.
-        const SYNC_THRESHOLD = 1.5; // secondi, soglia sotto la quale non si recupera comunque
-        const shouldCatchUp = adTrack._isLateJoin && elapsed > SYNC_THRESHOLD && elapsed < (spotAudio.duration || Infinity);
-        spotAudio.currentTime = shouldCatchUp ? elapsed : 0;
-        // Volume dello spot proporzionale al volume generale (niente più +0.2 fisso):
-        // a volume generale basso/zero, lo spot deve essere basso/zero anch'esso.
-        spotAudio.volume = Math.min(1, volume * adVolume);
-        spotAudio.play().catch((e) => console.warn("Spot bloccato:", e.message));
-      };
-      if (spotAudio.readyState >= 4) startSpot();
-      else {
-        // Rete di sicurezza: su connessioni molto instabili "canplaythrough" (la stima
-        // del browser su "posso arrivare alla fine senza fermarmi") potrebbe non
-        // arrivare mai. Meglio uno spot che rischia uno stallo che uno che non parte
-        // affatto: dopo 5s si parte comunque, qualunque cosa succeda per prima.
-        let started = false;
-        const startOnce = () => { if (started) return; started = true; startSpot(); };
-        spotAudio.addEventListener("canplaythrough", startOnce, { once: true });
-        setTimeout(startOnce, 5000);
-      }
+      spotAudio.currentTime = 0;
+      spotAudio.play().catch((e) => console.warn("Spot bloccato:", e.message));
     } else {
       lastStartedAdKeyRef.current = null;
       finishedAdKeyRef.current = null;
@@ -1271,7 +1270,7 @@ export default function RadioPucciotto() {
       isDuckingRef.current = false;
       applyMusicVolume();
     }
-  }, [adTrack, isGestionale, volume, adVolume, radioTrack, isPlaying]);
+  }, [adTrack, isGestionale, volume, adVolume, isPlaying]);
 
   // Vista radio pubblica: quando lo spot LOCALE finisce (evento "ended"), ripristiniamo
   // subito il volume della musica, SENZA aspettare che il gestionale scriva null su
@@ -1293,24 +1292,10 @@ export default function RadioPucciotto() {
     return () => spotAudio.removeEventListener("ended", onSpotEnded);
   }, [isGestionale]);
 
-  // Rete di sicurezza indipendente: se lo spot in corso si ferma per un motivo
-  // imprevisto (buffering, tab in background, o qualunque altra causa non ancora
-  // individuata) lo si fa ripartire da SOLO, dal punto esatto in cui si era fermato
-  // (mai da capo). Si attiva solo se pensiamo che uno spot dovrebbe essere ancora in
-  // corso (lastStartedAdKeyRef impostato) e non è arrivato naturalmente alla fine.
-  useEffect(() => {
-    if (isGestionale || !adAudioRef.current) return;
-    const spotAudio = adAudioRef.current;
-    const onUnexpectedPause = () => {
-      if (!lastStartedAdKeyRef.current) return; // nessuno spot dovrebbe essere in corso
-      if (!isPlayingRef.current) return; // l'ascoltatore ha messo pausa volontariamente
-      const nearEnd = spotAudio.duration && spotAudio.currentTime >= spotAudio.duration - 0.3;
-      if (nearEnd) return; // finito naturalmente, arriverà l'evento "ended"
-      spotAudio.play().catch(() => {});
-    };
-    spotAudio.addEventListener("pause", onUnexpectedPause);
-    return () => spotAudio.removeEventListener("pause", onUnexpectedPause);
-  }, [isGestionale]);
+  // (Rimosso) L'effetto che faceva ripartire da solo lo spot su "pausa imprevista": era
+  // una delle cause del bug "lo spot si ferma e ricomincia". Ora lo spot, se per un motivo
+  // qualsiasi si ferma, resta fermo (dura pochi secondi): meglio uno spot che finisce un
+  // attimo prima che uno che si riavvia in loop.
 
   // Vista radio pubblica: quando arriva/cambia radioTrack, carica il brano giusto
   // (YouTube o file custom) e si posiziona nel punto esatto di trasmissione, sincronizzato.
@@ -1359,7 +1344,11 @@ export default function RadioPucciotto() {
         if (lastPublicStartedAtRef.current !== radioTrack.startedAt) {
           lastPublicStartedAtRef.current = radioTrack.startedAt;
           const elapsed = (Date.now() - radioTrack.startedAt) / 1000;
-          if (elapsed >= 0 && elapsed < (audioRef.current.duration || Infinity)) {
+          // Riposiziona solo se lo scarto è sensibile (> 2s): piccole differenze (latenza,
+          // ripubblicazioni per riallineamento) non devono far "saltare" il brano
+          // avanti/indietro sull'ascoltatore.
+          const drift = Math.abs(elapsed - (audioRef.current.currentTime || 0));
+          if (elapsed >= 0 && elapsed < (audioRef.current.duration || Infinity) && drift > 2) {
             audioRef.current.currentTime = elapsed;
           }
         }
@@ -1375,7 +1364,7 @@ export default function RadioPucciotto() {
         armSuppressPause();
         ytPlayerRef.current.loadVideoById({ videoId: radioTrack.videoId, startSeconds: elapsed });
         ytPlayerRef.current.unMute?.();
-        ytPlayerRef.current.setVolume?.(volume * 100);
+        applyMusicVolume(); // rispetta il ducking se c'è uno spot in corso durante il cambio brano
         // loadVideoById avvia sempre la riproduzione; se il browser blocca l'autoplay
         // (mancanza di interazione utente), onStateChange non passerà mai a PLAYING e
         // isPlaying resterà false: l'utente vedrà comunque il tasto Play pronto.
@@ -1385,8 +1374,11 @@ export default function RadioPucciotto() {
         // dove il video si era fermato — così non parte più "da un punto diverso".
         keepAliveLoopRef.current = false;
         ytPlayerRef.current.unMute?.();
-        ytPlayerRef.current.setVolume?.(volume * 100);
-        ytPlayerRef.current.seekTo(elapsed, true);
+        applyMusicVolume();
+        // Riposiziona solo se lo scarto dal punto live è sensibile (> 2s): evita micro-salti
+        // ad ogni riallineamento/ripubblicazione (che davano l'effetto "torna indietro").
+        const cur = ytPlayerRef.current.getCurrentTime?.() || 0;
+        if (Math.abs(elapsed - cur) > 2) ytPlayerRef.current.seekTo(elapsed, true);
         ytPlayerRef.current.playVideo();
       } else {
         ytPlayerRef.current.pauseVideo();
