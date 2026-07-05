@@ -85,15 +85,13 @@ export default function RadioPucciotto() {
   // udibili "comunque" come prima (c'era un pavimento fisso +0.2 che li rendeva
   // sempre percepibili anche a volume minimo).
   const [adVolume, setAdVolume] = useState(0.7);
-  // Attivano/disattivano indipendentemente i due meccanismi di spot: quello
-  // periodico ogni 2 minuti in sottofondo, e quello "solo" ogni 3 canzoni.
+  // Attiva/disattiva l'unico meccanismo di spot rimasto: quello periodico "ogni N minuti"
+  // in sottofondo (sopra la musica). Lo spot legato al numero di canzoni è stato rimosso.
   const [adEvery2MinEnabled, setAdEvery2MinEnabled] = useState(true);
-  const [adEvery3SongsEnabled, setAdEvery3SongsEnabled] = useState(true);
   // Minuti configurabili tra uno spot "in sottofondo" e il successivo (prima era
   // fisso a 2 minuti, non modificabile dal gestionale).
   const [adIntervalMinutes, setAdIntervalMinutes] = useState(2);
   const [adLine, setAdLine] = useState(0);
-  const [playsUntilAd, setPlaysUntilAd] = useState(3);
   const [status, setStatus] = useState("Pronto");
   const [shuffleMode, setShuffleMode] = useState(false);
   // La playlist shuffled è salvata in state, NON ricalcolata ad ogni render
@@ -539,9 +537,9 @@ export default function RadioPucciotto() {
         events: {
           onReady: () => { ytPlayerRef.current.setVolume(volume * 100); setYtReady(true); },
           onStateChange: (e) => {
-            // goNext() gestisce anche la logica dello spot pubblicitario locale (playSpotSolo):
-            // deve girare SOLO nel gestionale, altrimenti in vista pubblica un video che finisce
-            // può far scattare uno spot non sincronizzato e bloccare/disallineare il video.
+            // goNext() (avanzamento al brano successivo) deve girare SOLO nel gestionale:
+            // in vista pubblica l'avanzamento è governato da Firebase, non dalla fine del
+            // video locale, altrimenti si disallineerebbe la trasmissione.
             if (e.data === window.YT.PlayerState.ENDED) {
               if (isGestionale) {
                 goNextRef.current();
@@ -806,6 +804,24 @@ export default function RadioPucciotto() {
     };
   }, []);
 
+  // Barra di avanzamento su lock screen / notifica (dove il browser la supporta): dà
+  // l'esperienza di un lettore musicale vero. In try/catch perché valori non validi
+  // (durata 0/NaN, posizione oltre la durata) fanno lanciare eccezioni all'API.
+  useEffect(() => {
+    if (!("mediaSession" in navigator) || !("setPositionState" in navigator.mediaSession)) return;
+    try {
+      if (duration && isFinite(duration) && duration > 0) {
+        navigator.mediaSession.setPositionState({
+          duration,
+          position: Math.max(0, Math.min(progress || 0, duration)),
+          playbackRate: 1,
+        });
+      } else {
+        navigator.mediaSession.setPositionState();
+      }
+    } catch (_) { /* valori non ancora validi, ignora */ }
+  }, [progress, duration]);
+
   // Gestionale: playSpotInBackground/playSpotSolo impostano il volume dello spot UNA
   // VOLTA SOLA, nel momento in cui parte. Senza questo effetto, se il gestore sposta lo
   // slider (volume generale o volume spot) MENTRE uno spot sta già suonando, quello
@@ -962,18 +978,10 @@ export default function RadioPucciotto() {
   // video appena avviato dal primo, mandando in stallo il player (da qui la
   // necessità di premere Play manualmente).
   const goNext = () => {
-    // Conteggio "spot ogni 3 canzoni" gestito FUORI dall'updater di setState: chiamare
-    // playSpotSolo() dentro l'updater era un effetto collaterale in un punto che React
-    // può eseguire più volte (es. StrictMode), col rischio di far partire lo spot due
-    // volte. goNextRef viene aggiornato ad ogni render, quindi qui playsUntilAd e
-    // adEvery3SongsEnabled sono sempre i valori correnti.
+    // Nessuno spot legato al cambio canzone: l'unico meccanismo di spot è quello "ogni N
+    // minuti" (timer sul tempo totale di trasmissione). goNext ora si limita a passare al
+    // brano successivo.
     if (!filtered.length) return; // lista vuota: evita currentIndex = NaN (% 0)
-    if (playsUntilAd <= 1) {
-      if (adEvery3SongsEnabled) playSpotSolo();
-      setPlaysUntilAd(3);
-    } else {
-      setPlaysUntilAd(playsUntilAd - 1);
-    }
     setCurrentIndex((i) => (i + 1) % filtered.length);
     setProgress(0);
     setIsPlaying(true);
@@ -1053,53 +1061,6 @@ export default function RadioPucciotto() {
     const p = spotAudio.play();
     // Se il browser rifiuta il play (autoplay bloccato) ripristiniamo subito: niente
     // spot, ma almeno la musica non resta abbassata per sempre.
-    if (p && p.catch) p.catch((e) => { console.warn("Spot bloccato:", e.message); finish(); });
-  };
-
-  const playSpotSolo = () => {
-    // Stesso motivo di playSpotInBackground: il muto locale non deve bloccare la
-    // pubblicazione dello spot per gli ascoltatori della radio pubblica.
-    if (!adAudioRef.current) return;
-    const spotAudio = adAudioRef.current;
-    // Stesso guard di playSpotInBackground: se c'è già uno spot in corso non lo tagliamo.
-    // Controllato PRIMA di mettere in pausa la musica, altrimenti la musica resterebbe
-    // in pausa senza che parta alcuno spot al posto suo.
-    if (!spotAudio.paused && spotAudio.src) return;
-    // Stesso cooldown condiviso di playSpotInBackground.
-    if ((Date.now() - lastAdEndedAtRef.current) / 1000 < MIN_GAP_BETWEEN_ADS_S) return;
-    const spotUrl = pickRandomSpot();
-    // Mettiamo in pausa il player realmente attivo ORA (currentRef, sempre aggiornato).
-    const isYT = currentRef.current && !currentRef.current.isCustom;
-    if (isYT) ytPlayerRef.current?.pauseVideo?.();
-    else audioRef.current?.pause();
-    spotAudio.src = spotUrl;
-    spotAudio.currentTime = 0;
-    // Volume dello spot proporzionale al volume generale (niente più +0.2 fisso):
-    // a volume generale basso/zero, lo spot deve essere basso/zero anch'esso.
-    spotAudio.volume = Math.min(1, volume * adVolume);
-    publishAdPlaying(spotUrl);
-    // NOTA: qui NON tocchiamo lastScheduledAdAtRef (l'orologio del timer "ogni N minuti").
-    // Prima lo spot "ogni 3 canzoni" lo resettava, azzerando il countdown dei minuti ad
-    // ogni terza canzone: è ciò che rendeva il timer imprevedibile e faceva sembrare i due
-    // meccanismi accoppiati. Ora l'orologio dei minuti è di proprietà esclusiva del suo
-    // timer: "ogni 3 canzoni" e "ogni N minuti" restano davvero indipendenti.
-    const restore = () => {
-      lastAdEndedAtRef.current = Date.now();
-      // Riprendiamo la musica SOLO se l'intento è ancora "in riproduzione": se il gestore
-      // ha messo in pausa durante lo spot, non dobbiamo farla ripartire da soli. Usiamo
-      // currentRef (SEMPRE aggiornato), non "isYT" congelata sopra: se il brano è cambiato
-      // tipo (YouTube ↔ custom) durante lo spot, riprendiamo quello attivo ORA.
-      if (isPlayingRef.current) {
-        const isYTNow = currentRef.current && !currentRef.current.isCustom;
-        if (isYTNow) ytPlayerRef.current?.playVideo?.();
-        else audioRef.current?.play().catch(() => {});
-      }
-      publishAdPlaying(null);
-    };
-    const finish = armSpotRestore(spotAudio, restore);
-    const p = spotAudio.play();
-    // Se il browser rifiuta il play (autoplay bloccato) ripristiniamo subito: senza questa
-    // rete la musica resterebbe in pausa per sempre (spot mai partito, mai "ended").
     if (p && p.catch) p.catch((e) => { console.warn("Spot bloccato:", e.message); finish(); });
   };
 
@@ -1738,7 +1699,10 @@ export default function RadioPucciotto() {
               </button>
             </div>
             <div className="ctrl-spacer" style={{ flex: 1 }} />
-            <div className="ad-counter" style={{ fontSize: "11px", color: "#888", width: "70px", textAlign: "right", flexShrink: 0 }}>Prox. spot: {playsUntilAd}</div>
+            {/* Spaziatore invisibile: bilancia il controllo volume a sinistra così i
+                pulsanti restano centrati (qui prima c'era il contatore "Prox. spot",
+                rimosso insieme al meccanismo "ogni 3 canzoni"). */}
+            <div className="ad-counter" style={{ width: "70px", flexShrink: 0 }} />
           </div>
 
           {/* Volume dedicato degli spot pubblicitari — indipendente dal volume generale,
@@ -1751,7 +1715,7 @@ export default function RadioPucciotto() {
             <span style={{ fontSize: "11px", color: "#888", width: "34px", textAlign: "right", flexShrink: 0 }}>{Math.round(adVolume * 100)}%</span>
           </div>
 
-          {/* Attivazione/disattivazione indipendente dei due meccanismi di spot */}
+          {/* Attivazione/disattivazione dell'unico meccanismo di spot: "ogni N minuti" */}
           <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
             <div className="cat-pill" style={{
               padding: "8px 16px", borderRadius: "20px", fontSize: "13px", fontWeight: 600,
@@ -1786,23 +1750,6 @@ export default function RadioPucciotto() {
                 }}
               />
               min
-            </div>
-            <div className="cat-pill" onClick={() => setAdEvery3SongsEnabled((v) => !v)} style={{
-              padding: "8px 16px", borderRadius: "20px", fontSize: "13px", fontWeight: 600,
-              background: adEvery3SongsEnabled ? RED : WHITE,
-              color: adEvery3SongsEnabled ? WHITE : BLACK,
-              border: adEvery3SongsEnabled ? "none" : "1px solid rgba(26,26,26,0.12)",
-              display: "flex", alignItems: "center", gap: "6px",
-            }}>
-              <span style={{
-                width: 16, height: 16, borderRadius: "4px", flexShrink: 0,
-                background: adEvery3SongsEnabled ? WHITE : "transparent",
-                border: adEvery3SongsEnabled ? "none" : "1px solid rgba(26,26,26,0.3)",
-                display: "flex", alignItems: "center", justifyContent: "center",
-              }}>
-                {adEvery3SongsEnabled && <Check size={12} color={RED} strokeWidth={3} />}
-              </span>
-              Spot ogni 3 canzoni
             </div>
           </div>
 
