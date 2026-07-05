@@ -3,11 +3,32 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+
+    <!-- PWA: rende l'app installabile ("Aggiungi a schermata Home") e la apre in una
+         finestra dedicata. NB: migliora l'esperienza e i controlli da notifica per l'audio
+         mp3, ma NON fa suonare in background i brani YouTube (limite di YouTube/browser). -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <meta name="theme-color" content="#c0392b" />
+
+    <!-- iOS: standalone a schermo intero + icona home (iOS richiede una PNG). -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Radio Pucciotto" />
+    <link rel="apple-touch-icon" href="/logo.png" />
+
     <title>Radio Pucciotto</title>
   </head>
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.jsx"></script>
+    <script>
+      // Registra il service worker (necessario per l'installabilità su vari browser).
+      if ("serviceWorker" in navigator) {
+        window.addEventListener("load", () => {
+          navigator.serviceWorker.register("/sw.js").catch(() => {});
+        });
+      }
+    </script>
   </body>
 </html>
