@@ -109,7 +109,12 @@ export default function RadioPucciotto() {
   // ("all'impazzata"). Impedisce un nuovo spot per almeno MIN_GAP_BETWEEN_ADS_S
   // secondi dopo la fine dell'ultimo, qualunque sia il meccanismo che lo ha avviato.
   const lastAdEndedAtRef = useRef(0);
-  const MIN_GAP_BETWEEN_ADS_S = 60;
+  // ORA segue direttamente il campo "Spot ogni ___ min": prima era un valore fisso
+  // di 60 secondi scollegato da quel campo, per cui modificarlo non aveva alcun
+  // effetto se "ogni 3 canzoni" faceva scattare gli spot più spesso (es. canzoni
+  // brevi). Così qualunque meccanismo faccia partire uno spot, il prossimo non potrà
+  // comunque arrivare prima del tempo che hai impostato tu.
+  const MIN_GAP_BETWEEN_ADS_S = Math.max(1, adIntervalMinutes) * 60;
   // Orologio di riferimento per il timer "ogni N minuti": invece di un unico
   // setTimer lungo (rallentato/ritardato dai browser quando la tab non è in
   // primo piano), controlliamo spesso se è già passato abbastanza tempo reale.
@@ -876,6 +881,10 @@ export default function RadioPucciotto() {
     spotAudio.volume = Math.min(1, originalVolume * adVolume);
     spotAudio.play().catch((e) => console.warn("Spot bloccato:", e.message));
     publishAdPlaying(spotUrl);
+    // Qualunque spot parta (anche se avviato da "ogni 3 canzoni"), l'orologio del
+    // timer a minuti riparte da qui: altrimenti i due meccanismi si sommavano
+    // (es. spot a 40s da "ogni 3 canzoni" + spot a 2 min dal timer, uno via l'altro).
+    lastScheduledAdAtRef.current = Date.now();
     const restore = () => {
       lastAdEndedAtRef.current = Date.now();
       if (isYT) ytPlayerRef.current?.setVolume?.(originalVolume * 100);
@@ -908,6 +917,9 @@ export default function RadioPucciotto() {
     spotAudio.volume = Math.min(1, volume * adVolume);
     spotAudio.play().catch((e) => console.warn("Spot bloccato:", e.message));
     publishAdPlaying(spotUrl);
+    // Stesso motivo di playSpotInBackground: qualunque spot parta, il timer a
+    // minuti riparte da qui, per non sommarsi con l'altro meccanismo.
+    lastScheduledAdAtRef.current = Date.now();
     const restore = () => {
       lastAdEndedAtRef.current = Date.now();
       if (isYT) ytPlayerRef.current?.playVideo?.();
@@ -1055,10 +1067,13 @@ export default function RadioPucciotto() {
 
       if (!isNewAdInstance) {
         spotAudio.volume = Math.min(1, volume * adVolume);
+        // Se per qualche motivo si era fermato (buffering momentaneo, tab in
+        // background, ecc.) lo riprendiamo dal punto esatto in cui era, SENZA
+        // riavvolgerlo: prima questo ramo si limitava ad aggiornare il volume e
+        // basta, quindi se lo spot restava fermo non ripartiva mai più da solo.
+        if (spotAudio.paused) spotAudio.play().catch(() => {});
         return;
       }
-      lastStartedAdKeyRef.current = adKey;
-
       lastStartedAdKeyRef.current = adKey;
 
       if (spotAudio.src !== new URL(adTrack.url, window.location.href).href) {
@@ -1086,12 +1101,31 @@ export default function RadioPucciotto() {
       if (spotAudio.readyState >= 3) startSpot();
       else spotAudio.addEventListener("canplay", startSpot, { once: true });
     } else {
+      lastStartedAdKeyRef.current = null;
       spotAudio.pause();
       ytPlayerRef.current?.setVolume?.(volume * 100);
       if (audioRef.current) audioRef.current.volume = volume;
-      lastStartedAdKeyRef.current = null;
     }
   }, [adTrack, isGestionale, volume, adVolume, radioTrack, isPlaying]);
+
+  // Rete di sicurezza indipendente: se lo spot in corso si ferma per un motivo
+  // imprevisto (buffering, tab in background, o qualunque altra causa non ancora
+  // individuata) lo si fa ripartire da SOLO, dal punto esatto in cui si era fermato
+  // (mai da capo). Si attiva solo se pensiamo che uno spot dovrebbe essere ancora in
+  // corso (lastStartedAdKeyRef impostato) e non è arrivato naturalmente alla fine.
+  useEffect(() => {
+    if (isGestionale || !adAudioRef.current) return;
+    const spotAudio = adAudioRef.current;
+    const onUnexpectedPause = () => {
+      if (!lastStartedAdKeyRef.current) return; // nessuno spot dovrebbe essere in corso
+      if (!isPlayingRef.current) return; // l'ascoltatore ha messo pausa volontariamente
+      const nearEnd = spotAudio.duration && spotAudio.currentTime >= spotAudio.duration - 0.3;
+      if (nearEnd) return; // finito naturalmente, arriverà l'evento "ended"
+      spotAudio.play().catch(() => {});
+    };
+    spotAudio.addEventListener("pause", onUnexpectedPause);
+    return () => spotAudio.removeEventListener("pause", onUnexpectedPause);
+  }, [isGestionale]);
 
   // Vista radio pubblica: quando arriva/cambia radioTrack, carica il brano giusto
   // (YouTube o file custom) e si posiziona nel punto esatto di trasmissione, sincronizzato.
