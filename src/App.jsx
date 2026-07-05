@@ -109,18 +109,32 @@ export default function RadioPucciotto() {
   // dei minuti si azzerava) ad ogni singolo play/pausa o cambio canzone.
   const isPlayingRef = useRef(false);
   useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
+  // Volume sempre aggiornato: i ripristini a fine spot devono tornare al volume ATTUALE,
+  // non a quello "fotografato" quando lo spot è partito (che poteva essere cambiato nel
+  // frattempo spostando lo slider). Prima restore() usava il valore congelato all'avvio.
+  const volumeRef = useRef(volume);
+  useEffect(() => { volumeRef.current = volume; }, [volume]);
+  // true SOLO mentre uno spot sta abbassando la musica ("ducking"). Serve a far sì che,
+  // se si sposta lo slider del volume MENTRE uno spot è in corso, la musica resti
+  // abbassata invece di tornare improvvisamente a tutto volume (l'effetto sul volume,
+  // più sotto, tiene conto di questo flag).
+  const isDuckingRef = useRef(false);
+  // Id del timeout di sicurezza dello spot in corso (vedi armSpotRestore).
+  const spotSafetyTimerRef = useRef(null);
   const lastSpotIndexRef = useRef(-1);
   // Condiviso tra i due meccanismi (ogni N minuti / ogni 3 canzoni): senza questo,
   // se scattavano vicini nel tempo gli spot partivano uno dietro l'altro senza pausa
   // ("all'impazzata"). Impedisce un nuovo spot per almeno MIN_GAP_BETWEEN_ADS_S
   // secondi dopo la fine dell'ultimo, qualunque sia il meccanismo che lo ha avviato.
   const lastAdEndedAtRef = useRef(0);
-  // ORA segue direttamente il campo "Spot ogni ___ min": prima era un valore fisso
-  // di 60 secondi scollegato da quel campo, per cui modificarlo non aveva alcun
-  // effetto se "ogni 3 canzoni" faceva scattare gli spot più spesso (es. canzoni
-  // brevi). Così qualunque meccanismo faccia partire uno spot, il prossimo non potrà
-  // comunque arrivare prima del tempo che hai impostato tu.
-  const MIN_GAP_BETWEEN_ADS_S = Math.max(1, adIntervalMinutes) * 60;
+  // Distanza minima FISSA tra due spot, qualunque meccanismo li avvii: serve solo a
+  // evitare che due spot partano letteralmente attaccati ("all'impazzata"), non a
+  // dettare la cadenza. Prima era legata al campo "Spot ogni ___ min" (interval*60):
+  // così lo spot "ogni 3 canzoni" veniva soppresso per MINUTI dal timer, sembrando
+  // partire "come gli pare" e dando l'impressione che i due meccanismi fossero
+  // accoppiati. Ora è un valore breve e costante, indipendente dall'intervallo dei
+  // minuti: i due meccanismi (ogni N minuti / ogni 3 canzoni) restano indipendenti.
+  const MIN_GAP_BETWEEN_ADS_S = 30;
   // Orologio di riferimento per il timer "ogni N minuti": invece di un unico
   // setTimer lungo (rallentato/ritardato dai browser quando la tab non è in
   // primo piano), controlliamo spesso se è già passato abbastanza tempo reale.
@@ -205,6 +219,56 @@ export default function RadioPucciotto() {
     // bloccato dal browser), torniamo a fidarci dei PAUSED per non restare "sordi"
     // a un blocco reale che richiede all'utente di premere Play.
     suppressPauseTimeoutRef.current = setTimeout(() => { suppressPauseRef.current = false; }, 2500);
+  };
+
+  // Applica il volume alla musica (YouTube + <audio> locale) tenendo conto del "ducking":
+  // mentre uno spot è in corso la musica va al 50%, altrimenti al volume pieno. Legge
+  // sempre volumeRef.current (valore ATTUALE) e isDuckingRef.current, così è l'unico punto
+  // che decide il volume della musica — usato sia quando si sposta lo slider, sia
+  // all'avvio/fine di uno spot. Prima questi due casi erano gestiti in punti diversi con
+  // valori "fotografati", e bastava un ripristino mancato per lasciare la musica abbassata.
+  const applyMusicVolume = () => {
+    const factor = isDuckingRef.current ? 0.5 : 1;
+    const v = volumeRef.current;
+    if (audioRef.current) audioRef.current.volume = Math.max(0, Math.min(1, v * factor));
+    ytPlayerRef.current?.setVolume?.(Math.max(0, Math.min(100, v * 100 * factor)));
+  };
+
+  // Avvia le "reti di sicurezza" che garantiscono l'esecuzione di restore() UNA sola
+  // volta, qualunque cosa ponga fine allo spot: fine naturale (ended), errore di
+  // caricamento/riproduzione (error) oppure — rete a tempo — uno spot che non emette mai
+  // "ended" (autoplay bloccato, scheda in background che sospende l'<audio>, file
+  // corrotto...). Senza queste reti, se "ended" non arrivava il ripristino non avveniva
+  // mai: la musica restava abbassata o in pausa per sempre. È esattamente il bug del
+  // "volume tagliato che resta anche a spot finito". Ritorna una funzione da chiamare
+  // subito se anche il play() iniziale viene rifiutato dal browser.
+  const armSpotRestore = (spotAudio, restore) => {
+    if (spotSafetyTimerRef.current) { clearTimeout(spotSafetyTimerRef.current); spotSafetyTimerRef.current = null; }
+    let done = false;
+    const arm = () => {
+      if (done) return;
+      if (spotSafetyTimerRef.current) clearTimeout(spotSafetyTimerRef.current);
+      const dur = isFinite(spotAudio.duration) && spotAudio.duration > 0 ? spotAudio.duration : 45;
+      spotSafetyTimerRef.current = setTimeout(finish, (dur + 4) * 1000);
+    };
+    const finish = () => {
+      if (done) return;
+      done = true;
+      spotAudio.removeEventListener("ended", finish);
+      spotAudio.removeEventListener("error", finish);
+      spotAudio.removeEventListener("loadedmetadata", arm);
+      if (spotSafetyTimerRef.current) { clearTimeout(spotSafetyTimerRef.current); spotSafetyTimerRef.current = null; }
+      restore();
+    };
+    spotAudio.addEventListener("ended", finish);
+    spotAudio.addEventListener("error", finish);
+    if (isFinite(spotAudio.duration) && spotAudio.duration > 0) arm();
+    else {
+      spotAudio.addEventListener("loadedmetadata", arm, { once: true });
+      // Rete assoluta se nemmeno i metadati arrivano: non lasciare mai lo spot "appeso".
+      spotSafetyTimerRef.current = setTimeout(finish, 60000);
+    }
+    return finish;
   };
 
   // Determina modalità all'avvio: ?gestionale nell'URL = pannello admin
@@ -504,8 +568,30 @@ export default function RadioPucciotto() {
               }
             }
             if (e.data === window.YT.PlayerState.PAUSED && !keepAliveLoopRef.current && !suppressPauseRef.current) {
-              setStatus("In pausa");
-              setIsPlaying(false);
+              // Nel gestionale la radio NON deve MAI fermarsi da sola: l'unica pausa
+              // legittima è quella richiesta dall'utente col pulsante (che imposta
+              // isPlaying=false PRIMA di far pausare il player, quindi qui isPlayingRef
+              // è già false e cadiamo nel ramo else, innocuo). Se invece arriva un PAUSED
+              // mentre l'intento è ancora "in riproduzione", è una pausa "fantasma" del
+              // browser (throttling della scheda in background, transizioni dell'iframe):
+              // la ignoriamo e, se siamo in primo piano, riprendiamo subito. In background
+              // non insistiamo qui per non entrare in un ping-pong col browser — ci pensa
+              // il gestore di visibilitychange a riprendere appena la scheda torna visibile.
+              if (isGestionale && isPlayingRef.current) {
+                if (document.visibilityState === "visible") ytPlayerRef.current?.playVideo?.();
+              } else {
+                setStatus("In pausa");
+                setIsPlaying(false);
+              }
+            }
+          },
+          // Video non riproducibile (rimosso, privato, bloccato per regione, embed
+          // disabilitato...): nel gestionale non restiamo bloccati sul brano morto,
+          // passiamo automaticamente al successivo invece di piantare la trasmissione.
+          onError: () => {
+            if (isGestionale) {
+              setStatus("Video non disponibile, passo al prossimo");
+              goNextRef.current();
             }
           },
         },
@@ -613,10 +699,10 @@ export default function RadioPucciotto() {
     }
   };
 
-  // Quando cambia il volume
+  // Quando cambia il volume: passa da applyMusicVolume, che tiene conto del ducking, così
+  // spostare lo slider MENTRE uno spot è in corso non riporta la musica a tutto volume.
   useEffect(() => {
-    if (audioRef.current) audioRef.current.volume = volume;
-    ytPlayerRef.current?.setVolume?.(volume * 100);
+    applyMusicVolume();
   }, [volume]);
 
   // ─── Wake Lock: impedisce che lo schermo si spenga/blocchi per inattività mentre
@@ -667,6 +753,29 @@ export default function RadioPucciotto() {
     document.addEventListener("visibilitychange", onVisibilityChange);
     return () => document.removeEventListener("visibilitychange", onVisibilityChange);
   }, [isPlaying]);
+
+  // Gestionale: recupero della riproduzione al ritorno in primo piano. I browser
+  // sospendono/rallentano l'iframe YouTube (e talvolta l'<audio>) quando la scheda va in
+  // background: al rientro il player può essere rimasto in pausa anche se l'intento è
+  // "in riproduzione". Qui, appena la scheda torna visibile, se stiamo trasmettendo
+  // riavviamo SEMPRE il player realmente attivo in questo momento (YouTube o file custom),
+  // così cambiare scheda/app non lascia mai la radio ferma. È la contropartita del fatto
+  // che ora ignoriamo i PAUSED "fantasma" mentre siamo in background.
+  useEffect(() => {
+    if (!isGestionale) return;
+    const onVis = () => {
+      if (document.visibilityState !== "visible" || !isPlayingRef.current) return;
+      const c = currentRef.current;
+      if (c && !c.isCustom) {
+        armSuppressPause();
+        ytPlayerRef.current?.playVideo?.();
+      } else if (audioRef.current && audioRef.current.paused) {
+        safePlayAudio(audioRef.current).catch(() => {});
+      }
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, [isGestionale]);
 
   // Media Session: espone titolo/artista e i controlli play-pausa al sistema operativo
   // (notifica, lock screen, cuffie bluetooth, tasti multimediali). Oltre a essere comodo,
@@ -853,10 +962,18 @@ export default function RadioPucciotto() {
   // video appena avviato dal primo, mandando in stallo il player (da qui la
   // necessità di premere Play manualmente).
   const goNext = () => {
-    setPlaysUntilAd((p) => {
-      if (p <= 1) { if (adEvery3SongsEnabled) playSpotSolo(); return 3; }
-      return p - 1;
-    });
+    // Conteggio "spot ogni 3 canzoni" gestito FUORI dall'updater di setState: chiamare
+    // playSpotSolo() dentro l'updater era un effetto collaterale in un punto che React
+    // può eseguire più volte (es. StrictMode), col rischio di far partire lo spot due
+    // volte. goNextRef viene aggiornato ad ogni render, quindi qui playsUntilAd e
+    // adEvery3SongsEnabled sono sempre i valori correnti.
+    if (!filtered.length) return; // lista vuota: evita currentIndex = NaN (% 0)
+    if (playsUntilAd <= 1) {
+      if (adEvery3SongsEnabled) playSpotSolo();
+      setPlaysUntilAd(3);
+    } else {
+      setPlaysUntilAd(playsUntilAd - 1);
+    }
     setCurrentIndex((i) => (i + 1) % filtered.length);
     setProgress(0);
     setIsPlaying(true);
@@ -864,6 +981,7 @@ export default function RadioPucciotto() {
   useEffect(() => { goNextRef.current = goNext; });
 
   const goPrev = () => {
+    if (!filtered.length) return; // lista vuota: evita currentIndex = NaN (% 0)
     setCurrentIndex((i) => (i - 1 + filtered.length) % filtered.length);
     setProgress(0);
     setIsPlaying(true);
@@ -910,34 +1028,32 @@ export default function RadioPucciotto() {
     // Cooldown condiviso: non far partire un altro spot se ne è appena finito uno
     // (avviato dall'altro meccanismo), anche se ora sono passati i suoi N minuti.
     if ((Date.now() - lastAdEndedAtRef.current) / 1000 < MIN_GAP_BETWEEN_ADS_S) return;
-    const originalVolume = volume;
     const spotUrl = pickRandomSpot();
-    // Abbassiamo il volume su ENTRAMBI i player, non solo quello "in uso" ora: se il
-    // brano cambia tipo (YouTube ↔ custom) proprio durante lo spot, al ripristino
-    // l'altro player resterebbe abbassato per sempre (stesso bug già risolto lato
-    // ascoltatore). Innocuo farlo su entrambi: quello non in uso non produce comunque
-    // audio, quindi impostarne il volume non ha alcun effetto percepibile.
-    ytPlayerRef.current?.setVolume?.(originalVolume * 50);
-    if (audioRef.current) audioRef.current.volume = originalVolume * 0.5;
+    // Abbassiamo la musica (ducking) tramite applyMusicVolume: agisce su ENTRAMBI i
+    // player (YouTube + <audio>), così se il brano cambia tipo durante lo spot nessuno
+    // dei due resta abbassato. Il flag isDuckingRef fa sì che anche spostando lo slider
+    // durante lo spot la musica resti abbassata.
+    isDuckingRef.current = true;
+    applyMusicVolume();
     spotAudio.src = spotUrl;
     spotAudio.currentTime = 0;
     // Volume dello spot proporzionale al volume generale (niente più +0.2 fisso):
     // a volume generale basso/zero, lo spot deve essere basso/zero anch'esso.
-    spotAudio.volume = Math.min(1, originalVolume * adVolume);
-    spotAudio.play().catch((e) => console.warn("Spot bloccato:", e.message));
+    spotAudio.volume = Math.min(1, volume * adVolume);
     publishAdPlaying(spotUrl);
-    // Qualunque spot parta (anche se avviato da "ogni 3 canzoni"), l'orologio del
-    // timer a minuti riparte da qui: altrimenti i due meccanismi si sommavano
-    // (es. spot a 40s da "ogni 3 canzoni" + spot a 2 min dal timer, uno via l'altro).
+    // Qualunque spot parta, l'orologio del timer a minuti riparte da qui.
     lastScheduledAdAtRef.current = Date.now();
     const restore = () => {
       lastAdEndedAtRef.current = Date.now();
-      ytPlayerRef.current?.setVolume?.(originalVolume * 100);
-      if (audioRef.current) audioRef.current.volume = originalVolume;
+      isDuckingRef.current = false;
+      applyMusicVolume(); // torna al volume ATTUALE (non a quello dell'avvio dello spot)
       publishAdPlaying(null);
-      spotAudio.removeEventListener("ended", restore);
     };
-    spotAudio.addEventListener("ended", restore);
+    const finish = armSpotRestore(spotAudio, restore);
+    const p = spotAudio.play();
+    // Se il browser rifiuta il play (autoplay bloccato) ripristiniamo subito: niente
+    // spot, ma almeno la musica non resta abbassata per sempre.
+    if (p && p.catch) p.catch((e) => { console.warn("Spot bloccato:", e.message); finish(); });
   };
 
   const playSpotSolo = () => {
@@ -951,8 +1067,9 @@ export default function RadioPucciotto() {
     if (!spotAudio.paused && spotAudio.src) return;
     // Stesso cooldown condiviso di playSpotInBackground.
     if ((Date.now() - lastAdEndedAtRef.current) / 1000 < MIN_GAP_BETWEEN_ADS_S) return;
-    const isYT = current && !current.isCustom;
     const spotUrl = pickRandomSpot();
+    // Mettiamo in pausa il player realmente attivo ORA (currentRef, sempre aggiornato).
+    const isYT = currentRef.current && !currentRef.current.isCustom;
     if (isYT) ytPlayerRef.current?.pauseVideo?.();
     else audioRef.current?.pause();
     spotAudio.src = spotUrl;
@@ -960,25 +1077,30 @@ export default function RadioPucciotto() {
     // Volume dello spot proporzionale al volume generale (niente più +0.2 fisso):
     // a volume generale basso/zero, lo spot deve essere basso/zero anch'esso.
     spotAudio.volume = Math.min(1, volume * adVolume);
-    spotAudio.play().catch((e) => console.warn("Spot bloccato:", e.message));
     publishAdPlaying(spotUrl);
-    // Stesso motivo di playSpotInBackground: qualunque spot parta, il timer a
-    // minuti riparte da qui, per non sommarsi con l'altro meccanismo.
-    lastScheduledAdAtRef.current = Date.now();
+    // NOTA: qui NON tocchiamo lastScheduledAdAtRef (l'orologio del timer "ogni N minuti").
+    // Prima lo spot "ogni 3 canzoni" lo resettava, azzerando il countdown dei minuti ad
+    // ogni terza canzone: è ciò che rendeva il timer imprevedibile e faceva sembrare i due
+    // meccanismi accoppiati. Ora l'orologio dei minuti è di proprietà esclusiva del suo
+    // timer: "ogni 3 canzoni" e "ogni N minuti" restano davvero indipendenti.
     const restore = () => {
       lastAdEndedAtRef.current = Date.now();
-      // Usiamo currentRef (SEMPRE aggiornato), non la "isYT" congelata qui sopra: se il
-      // brano è cambiato tipo (YouTube ↔ custom) MENTRE lo spot era in corso, dobbiamo
-      // riprendere quello che è realmente attivo ORA, non quello che lo era quando lo
-      // spot è partito — altrimenti si prova a far ripartire il player sbagliato,
-      // lasciando quello vero (e quindi la musica) fermo per sempre.
-      const isYTNow = currentRef.current && !currentRef.current.isCustom;
-      if (isYTNow) ytPlayerRef.current?.playVideo?.();
-      else audioRef.current?.play().catch(() => {});
+      // Riprendiamo la musica SOLO se l'intento è ancora "in riproduzione": se il gestore
+      // ha messo in pausa durante lo spot, non dobbiamo farla ripartire da soli. Usiamo
+      // currentRef (SEMPRE aggiornato), non "isYT" congelata sopra: se il brano è cambiato
+      // tipo (YouTube ↔ custom) durante lo spot, riprendiamo quello attivo ORA.
+      if (isPlayingRef.current) {
+        const isYTNow = currentRef.current && !currentRef.current.isCustom;
+        if (isYTNow) ytPlayerRef.current?.playVideo?.();
+        else audioRef.current?.play().catch(() => {});
+      }
       publishAdPlaying(null);
-      spotAudio.removeEventListener("ended", restore);
     };
-    spotAudio.addEventListener("ended", restore);
+    const finish = armSpotRestore(spotAudio, restore);
+    const p = spotAudio.play();
+    // Se il browser rifiuta il play (autoplay bloccato) ripristiniamo subito: senza questa
+    // rete la musica resterebbe in pausa per sempre (spot mai partito, mai "ended").
+    if (p && p.catch) p.catch((e) => { console.warn("Spot bloccato:", e.message); finish(); });
   };
 
   // Gestionale: pubblica su Firebase ogni volta che current cambia, o quando si preme Play
@@ -1062,6 +1184,10 @@ export default function RadioPucciotto() {
   // tocca lo slider "Volume spot" durante lo spot stesso) lo spot ripartiva da capo
   // per tutti gli ascoltatori, invece di continuare da dove era arrivato.
   const lastStartedAdKeyRef = useRef(null);
+  // Ricorda l'ultimo spot GIÀ concluso localmente (evento "ended"): se l'effetto si
+  // riattiva mentre su Firebase c'è ancora lo stesso spot (il null di fine non è ancora
+  // arrivato), questo evita di rimetterlo in play e di ri-abbassare la musica.
+  const finishedAdKeyRef = useRef(null);
   useEffect(() => {
     if (isGestionale) return;
     const adPlayingRef = ref(db, "adPlaying");
@@ -1096,24 +1222,41 @@ export default function RadioPucciotto() {
       const MAX_PLAUSIBLE_SPOT_AGE_S = 90;
       const age = (Date.now() - (adTrack.startedAt || 0)) / 1000;
       if (age > MAX_PLAUSIBLE_SPOT_AGE_S) {
+        // Residuo orfano: oltre a non riprodurlo, ci assicuriamo che la musica NON resti
+        // abbassata (se un ducking era attivo lo togliamo), altrimenti un vecchio spot mai
+        // ripulito lascerebbe l'ascoltatore col volume tagliato per sempre.
         spotAudio.pause();
+        lastStartedAdKeyRef.current = null;
+        isDuckingRef.current = false;
+        applyMusicVolume();
+        return;
+      }
+
+      // Identifica IL preciso spot in onda (url + istante di partenza).
+      const adKey = adTrack.url + "|" + (adTrack.startedAt || 0);
+
+      // Se questo esatto spot è GIÀ finito localmente ma su Firebase è ancora presente
+      // (il null di fine non è ancora arrivato, o non arriverà mai perché il gestionale
+      // è caduto), non rimetterlo in play e non ri-abbassare la musica: teniamo la musica
+      // a volume pieno e usciamo.
+      if (finishedAdKeyRef.current === adKey) {
+        spotAudio.pause();
+        isDuckingRef.current = false;
+        applyMusicVolume();
         return;
       }
 
       wasPlayingBeforeAdRef.current = isPlaying;
-      // Abbassiamo il volume su ENTRAMBI i player (YT e <audio> locale), non solo su
-      // quello che sembra "in uso" ora: se il gestionale cambia brano (es. da YouTube
-      // a un file custom o viceversa) proprio durante lo spot, al ripristino l'altro
-      // player restava abbassato per sempre, perché il codice si basava sul tipo di
-      // brano DI QUEL momento invece di ripristinare comunque tutto.
-      ytPlayerRef.current?.setVolume?.(volume * 50);
-      if (audioRef.current) audioRef.current.volume = volume * 0.5;
+      // Abbassiamo la musica (ducking) tramite applyMusicVolume: agisce su ENTRAMBI i
+      // player (YT e <audio> locale), così se il gestionale cambia tipo di brano durante
+      // lo spot nessuno dei due resta abbassato. isDuckingRef fa sì che anche spostando lo
+      // slider durante lo spot la musica resti abbassata.
+      isDuckingRef.current = true;
+      applyMusicVolume();
 
-      // Identifica IL preciso spot in onda (url + istante di partenza): se è lo
-      // stesso di prima, l'effetto si sta solo riattivando per un motivo estraneo
-      // (es. volume/adVolume cambiati) e non deve far ripartire l'audio da capo,
+      // Se è lo stesso spot di prima, l'effetto si sta solo riattivando per un motivo
+      // estraneo (es. volume/adVolume cambiati) e non deve far ripartire l'audio da capo,
       // deve solo aggiornarne il volume.
-      const adKey = adTrack.url + "|" + (adTrack.startedAt || 0);
       const isNewAdInstance = lastStartedAdKeyRef.current !== adKey;
 
       if (!isNewAdInstance) {
@@ -1162,11 +1305,32 @@ export default function RadioPucciotto() {
       }
     } else {
       lastStartedAdKeyRef.current = null;
+      finishedAdKeyRef.current = null;
       spotAudio.pause();
-      ytPlayerRef.current?.setVolume?.(volume * 100);
-      if (audioRef.current) audioRef.current.volume = volume;
+      isDuckingRef.current = false;
+      applyMusicVolume();
     }
   }, [adTrack, isGestionale, volume, adVolume, radioTrack, isPlaying]);
+
+  // Vista radio pubblica: quando lo spot LOCALE finisce (evento "ended"), ripristiniamo
+  // subito il volume della musica, SENZA aspettare che il gestionale scriva null su
+  // Firebase. Se quel null non arrivasse mai (gestionale che crolla a metà spot), prima
+  // la musica restava abbassata per sempre: è il lato ascoltatore del bug del "volume
+  // tagliato che resta". Ora il ducking si chiude comunque alla fine dello spot.
+  useEffect(() => {
+    if (isGestionale || !adAudioRef.current) return;
+    const spotAudio = adAudioRef.current;
+    const onSpotEnded = () => {
+      // Marca questo spot come "già concluso" (vedi finishedAdKeyRef): se resta su
+      // Firebase non verrà rimesso in play. Non azzeriamo lastStartedAdKeyRef qui, così
+      // il guard "già finito" nell'effetto sopra riconosce ancora la chiave.
+      finishedAdKeyRef.current = lastStartedAdKeyRef.current;
+      isDuckingRef.current = false;
+      applyMusicVolume();
+    };
+    spotAudio.addEventListener("ended", onSpotEnded);
+    return () => spotAudio.removeEventListener("ended", onSpotEnded);
+  }, [isGestionale]);
 
   // Rete di sicurezza indipendente: se lo spot in corso si ferma per un motivo
   // imprevisto (buffering, tab in background, o qualunque altra causa non ancora
