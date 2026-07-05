@@ -192,6 +192,12 @@ export default function RadioPucciotto() {
   // di goNext, così l'evento ENDED del player YouTube segue sempre la lista/indice
   // reali al momento in cui il video finisce, anche in modalità casuale.
   const goNextRef = useRef(() => {});
+  // Sempre aggiornato su "current": serve a playSpotSolo per capire, nel momento in
+  // cui lo spot FINISCE, quale player va davvero ripreso — se nel frattempo (durante
+  // lo spot) si è cambiato brano passando da YouTube a un file custom o viceversa,
+  // usare il valore "congelato" di quando lo spot è partito farebbe ripartire il
+  // player sbagliato (quello vecchio, non più quello attivo) lasciando l'altro fermo.
+  const currentRef = useRef(null);
   const armSuppressPause = () => {
     suppressPauseRef.current = true;
     if (suppressPauseTimeoutRef.current) clearTimeout(suppressPauseTimeoutRef.current);
@@ -224,6 +230,7 @@ export default function RadioPucciotto() {
     : allTracks.filter((t) => t.category === category);
 
   const current = filtered[currentIndex] || filtered[0];
+  useEffect(() => { currentRef.current = current; });
 
   // Vista radio pubblica: precarica in anticipo tutti i file degli spot (invece di
   // scaricarli solo nel momento in cui arriva l'evento da Firebase). Senza questo,
@@ -903,11 +910,15 @@ export default function RadioPucciotto() {
     // Cooldown condiviso: non far partire un altro spot se ne è appena finito uno
     // (avviato dall'altro meccanismo), anche se ora sono passati i suoi N minuti.
     if ((Date.now() - lastAdEndedAtRef.current) / 1000 < MIN_GAP_BETWEEN_ADS_S) return;
-    const isYT = current && !current.isCustom;
     const originalVolume = volume;
     const spotUrl = pickRandomSpot();
-    if (isYT) ytPlayerRef.current?.setVolume?.(originalVolume * 50);
-    else if (audioRef.current) audioRef.current.volume = originalVolume * 0.5;
+    // Abbassiamo il volume su ENTRAMBI i player, non solo quello "in uso" ora: se il
+    // brano cambia tipo (YouTube ↔ custom) proprio durante lo spot, al ripristino
+    // l'altro player resterebbe abbassato per sempre (stesso bug già risolto lato
+    // ascoltatore). Innocuo farlo su entrambi: quello non in uso non produce comunque
+    // audio, quindi impostarne il volume non ha alcun effetto percepibile.
+    ytPlayerRef.current?.setVolume?.(originalVolume * 50);
+    if (audioRef.current) audioRef.current.volume = originalVolume * 0.5;
     spotAudio.src = spotUrl;
     spotAudio.currentTime = 0;
     // Volume dello spot proporzionale al volume generale (niente più +0.2 fisso):
@@ -921,8 +932,8 @@ export default function RadioPucciotto() {
     lastScheduledAdAtRef.current = Date.now();
     const restore = () => {
       lastAdEndedAtRef.current = Date.now();
-      if (isYT) ytPlayerRef.current?.setVolume?.(originalVolume * 100);
-      else if (audioRef.current) audioRef.current.volume = originalVolume;
+      ytPlayerRef.current?.setVolume?.(originalVolume * 100);
+      if (audioRef.current) audioRef.current.volume = originalVolume;
       publishAdPlaying(null);
       spotAudio.removeEventListener("ended", restore);
     };
@@ -956,7 +967,13 @@ export default function RadioPucciotto() {
     lastScheduledAdAtRef.current = Date.now();
     const restore = () => {
       lastAdEndedAtRef.current = Date.now();
-      if (isYT) ytPlayerRef.current?.playVideo?.();
+      // Usiamo currentRef (SEMPRE aggiornato), non la "isYT" congelata qui sopra: se il
+      // brano è cambiato tipo (YouTube ↔ custom) MENTRE lo spot era in corso, dobbiamo
+      // riprendere quello che è realmente attivo ORA, non quello che lo era quando lo
+      // spot è partito — altrimenti si prova a far ripartire il player sbagliato,
+      // lasciando quello vero (e quindi la musica) fermo per sempre.
+      const isYTNow = currentRef.current && !currentRef.current.isCustom;
+      if (isYTNow) ytPlayerRef.current?.playVideo?.();
       else audioRef.current?.play().catch(() => {});
       publishAdPlaying(null);
       spotAudio.removeEventListener("ended", restore);
@@ -1132,8 +1149,17 @@ export default function RadioPucciotto() {
         spotAudio.volume = Math.min(1, volume * adVolume);
         spotAudio.play().catch((e) => console.warn("Spot bloccato:", e.message));
       };
-      if (spotAudio.readyState >= 3) startSpot();
-      else spotAudio.addEventListener("canplay", startSpot, { once: true });
+      if (spotAudio.readyState >= 4) startSpot();
+      else {
+        // Rete di sicurezza: su connessioni molto instabili "canplaythrough" (la stima
+        // del browser su "posso arrivare alla fine senza fermarmi") potrebbe non
+        // arrivare mai. Meglio uno spot che rischia uno stallo che uno che non parte
+        // affatto: dopo 5s si parte comunque, qualunque cosa succeda per prima.
+        let started = false;
+        const startOnce = () => { if (started) return; started = true; startSpot(); };
+        spotAudio.addEventListener("canplaythrough", startOnce, { once: true });
+        setTimeout(startOnce, 5000);
+      }
     } else {
       lastStartedAdKeyRef.current = null;
       spotAudio.pause();
@@ -1466,13 +1492,21 @@ export default function RadioPucciotto() {
         {/* Player */}
         <div className="player-card" style={{ background: WHITE, borderRadius: "20px", padding: "28px", border: "1px solid rgba(26,26,26,0.08)", boxShadow: "0 4px 20px rgba(0,0,0,.04)", display: "flex", flexDirection: "column", gap: "20px" }}>
           <div style={{ display: "flex", gap: "20px", alignItems: "center" }}>
-            <div style={{ width: 84, height: 84, borderRadius: "16px", overflow: "hidden", background: BLACK, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-              {current?.isCustom ? (
-                <div style={{ width: "100%", height: "100%", borderRadius: "16px", background: `linear-gradient(135deg, ${current?.color || RED}, ${BLACK})`, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <div style={{ width: 84, height: 84, borderRadius: "16px", overflow: "hidden", background: BLACK, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, position: "relative" }}>
+              {/* Il player YouTube viene creato UNA SOLA VOLTA e prende possesso di questo
+                  div sostituendolo con un iframe reale (manipolazione diretta del DOM,
+                  fuori dal controllo di React). PRIMA questo div veniva mostrato/nascosto
+                  condizionalmente insieme all'icona "brano custom": React lo smontava e
+                  rimontava ogni volta che si passava da un brano YouTube a uno caricato da
+                  voi (o viceversa), senza sapere che nel frattempo era diventato un iframe
+                  vero — questo poteva rompere silenziosamente il player (audio muto,
+                  a volte un errore reale). Ora resta SEMPRE montato, nascosto solo con le
+                  CSS quando non serve, così la sua identità nel DOM non cambia mai. */}
+              <div id="yt-player" style={{ width: "100%", height: "100%", display: current?.isCustom ? "none" : "block" }} />
+              {current?.isCustom && (
+                <div style={{ position: "absolute", inset: 0, borderRadius: "16px", background: `linear-gradient(135deg, ${current?.color || RED}, ${BLACK})`, display: "flex", alignItems: "center", justifyContent: "center" }}>
                   <Music size={32} color={WHITE} />
                 </div>
-              ) : (
-                <div id="yt-player" />
               )}
             </div>
             <div style={{ flex: 1, minWidth: 0 }}>
