@@ -122,6 +122,27 @@ export default function RadioPucciotto() {
   const audioRef = useRef(null);
   const adAudioRef = useRef(null);
   const wakeLockRef = useRef(null);
+  // "Ancora audio" per il gestionale: un audio nativo reale (non nell'iframe
+  // YouTube) che suona in loop, quasi impercettibile, mentre si è on air. Il player
+  // YouTube è un iframe di terze parti, e i browser lo rallentano/sospendono quando
+  // si cambia tab — Wake Lock e Media Session non bastano a evitarlo, perché l'audio
+  // "vero" nasce dentro l'iframe, non nella pagina. Un <audio> nativo che suona
+  // davvero fa sì che il browser riconosca la tab come "audio attivo" e la penalizzi
+  // molto meno in background, aiutando anche l'iframe YouTube accanto a restare vivo.
+  const keepAliveAudioRef = useRef(null);
+  useEffect(() => {
+    if (!isGestionale) return;
+    const a = new Audio("data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=");
+    a.loop = true;
+    a.volume = 0.01;
+    keepAliveAudioRef.current = a;
+    return () => { a.pause(); keepAliveAudioRef.current = null; };
+  }, [isGestionale]);
+  useEffect(() => {
+    if (!isGestionale || !keepAliveAudioRef.current) return;
+    if (isPlaying) keepAliveAudioRef.current.play().catch(() => {});
+    else keepAliveAudioRef.current.pause();
+  }, [isPlaying, isGestionale]);
   const ytPlayerRef = useRef(null);
   const [ytReady, setYtReady] = useState(false);
 
@@ -357,16 +378,24 @@ export default function RadioPucciotto() {
               /\b(full album|full movie|episode|trailer|teaser|bts|behind the scene)\b/.test(t) ||
               /\b(how to|tutorial|lesson|corso|come si|come fare|come registrare|come suonare|beginner|imparare|budget|low cost|cheap)\b/.test(t) ||
               /^(come|how|tutorial|lezione|guida|recensione|review|unboxing)\b/.test(t) ||
+              // Spot pubblicitari / presentazioni che si infilano tra i risultati musicali:
+              /\b(spot pubblicitario|pubblicit[aà]|presentazione aziendale|presentazione ufficiale|commercial|advertisement|advert|promo video|company profile|corporate video|jingle|sigla)\b/.test(t) ||
               (title.match(/#\w+/g) || []).length >= 2 ||
               (title.match(/[|•·—–]/g) || []).length >= 2 ||
               /\d{4}.*\d{4}/.test(t)
             );
           };
+          // Titoli/canali di musica indiana o asiatica spesso traslitterati in
+          // caratteri latini (quindi invisibili a hasNonLatin, che guarda solo
+          // l'alfabeto): li intercettiamo per parole chiave esplicite.
+          const FOREIGN_KEYWORDS = /\b(bollywood|hindi|punjabi|bhojpuri|bhajan|desi|tamil|telugu|kannada|malayalam|marathi|gujarati|urdu song|pakistani song|k-?pop|kdrama|korean drama|mandarin|cantonese|chinese song|c-?pop|dangdut|indonesian song|thai song|vietnamese song|j-?pop|japanese song|anime opening|anime ending)\b/;
+          const isForeignLatin = (str) => FOREIGN_KEYWORDS.test(str.toLowerCase());
           return (data.items || [])
             .filter((it) => {
               const title = it.snippet.title;
               const channel = it.snippet.channelTitle;
-              return !hasNonLatin(title) && !hasNonLatin(channel) && !isSpam(title);
+              return !hasNonLatin(title) && !hasNonLatin(channel) && !isSpam(title)
+                && !isForeignLatin(title) && !isForeignLatin(channel);
             })
             .map((it) => ({
               id: it.id.videoId + "_" + label,
