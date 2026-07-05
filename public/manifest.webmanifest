@@ -1,0 +1,17 @@
+{
+  "name": "Radio Pucciotto",
+  "short_name": "Radio Pucciotto",
+  "description": "La radio di Pucciotto: musica no-stop e spot, in diretta.",
+  "id": "/",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#1a1a1a",
+  "theme_color": "#c0392b",
+  "lang": "it",
+  "icons": [
+    { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "maskable" }
+  ]
+}
