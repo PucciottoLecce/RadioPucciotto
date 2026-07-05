@@ -56,6 +56,12 @@ function shuffleArray(arr) {
 }
 
 export default function RadioPucciotto() {
+  // Determina modalità all'avvio: ?gestionale nell'URL = pannello admin.
+  // DEVE stare qui, prima di ogni altra cosa: viene usata anche dentro le dependency
+  // array di alcuni useEffect più sotto, e quelle vengono valutate SUBITO durante il
+  // render (non in modo differito come il corpo degli effetti) — dichiararla più in
+  // basso nel file causava un errore che bloccava il caricamento dell'intera pagina.
+  const isGestionale = window.location.search.includes("gestionale");
   const [tracks, setTracks] = useState(YOUTUBE_FALLBACK_TRACKS);
   const [customTracks, setCustomTracks] = useState([]);
 
@@ -196,7 +202,6 @@ export default function RadioPucciotto() {
   };
 
   // Determina modalità all'avvio: ?gestionale nell'URL = pannello admin
-  const isGestionale = window.location.search.includes("gestionale");
 
   // Lista base (jamendo + custom), mai shuffled
   const baseList = useMemo(() => [...tracks, ...customTracks], [tracks, customTracks]);
