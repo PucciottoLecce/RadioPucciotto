@@ -9,13 +9,6 @@ const BLACK = "#1a1a1a";
 const CREAM = "#faf7f4";
 const COLOR_PALETTE = [RED, "#e67e22", "#2c3e50", "#27ae60", "#8e44ad", "#d35400"];
 const MY_SONGS_COLOR = "#c0392b";
-// Margine di sicurezza (secondi) con cui l'ascoltatore parte LEGGERMENTE indietro rispetto
-// alla posizione calcolata dal gestionale. Il gestionale segna startedAt al cambio brano,
-// ma il suo video parte davvero un istante dopo (caricamento/buffer): senza margine gli
-// ascoltatori risultano un filo AVANTI e arrivano a fine brano prima, innescando il breve
-// "replay" del loop di attesa. Con questo piccolo ritardo restano appena dietro la diretta
-// (impercettibile per una radio) e la transizione tra i brani resta pulita.
-const LISTENER_SYNC_LAG_S = 1.5;
 
 const FALLBACK_TRACKS = [
   { id: 1, title: "Notte Elettrica", artist: "SoundHelix", category: "Elettronica", url: "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3", color: "#FF6B4A", isCustom: false },
@@ -472,7 +465,11 @@ export default function RadioPucciotto() {
       if (publishedAfter) url += `&publishedAfter=${publishedAfter}`;
       return fetchJsonWithRetry(url, label)
         .then((data) => {
-          const hasNonLatin = (str) => /[\u0900-\u097F\u0980-\u09FF\u0A00-\u0A7F\u0A80-\u0AFF\u0B00-\u0B7F\u0B80-\u0BFF\u0C00-\u0C7F\u0C80-\u0CFF\u0D00-\u0D7F\u0E00-\u0E7F\u0F00-\u0FFF\u1000-\u109F\u1100-\u11FF\u3000-\u9FFF\uA000-\uA48F\uAC00-\uD7AF\uF900-\uFAFF\u3400-\u4DBF]/.test(str);
+          // Blocca i titoli/canali scritti in alfabeti non latini: indiani (devanagari,
+          // bengali, gurmukhi, gujarati, oriya, tamil, telugu, kannada, malayalam,
+          // singalese), sud-est asiatico (thai, lao, khmer, birmano), Asia orientale
+          // (CJK, hangul, kana), arabo (con forme di presentazione) ed etiope.
+          const hasNonLatin = (str) => /[\u0600-\u06FF\u0750-\u077F\u0900-\u097F\u0980-\u09FF\u0A00-\u0A7F\u0A80-\u0AFF\u0B00-\u0B7F\u0B80-\u0BFF\u0C00-\u0C7F\u0C80-\u0CFF\u0D00-\u0D7F\u0D80-\u0DFF\u0E00-\u0E7F\u0E80-\u0EFF\u0F00-\u0FFF\u1000-\u109F\u1100-\u11FF\u1200-\u137F\u1780-\u17FF\u3000-\u9FFF\uA000-\uA48F\uAC00-\uD7AF\uF900-\uFAFF\uFB50-\uFDFF\uFE70-\uFEFF\u3400-\u4DBF]/.test(str);
           const isSpam = (title) => {
             if (title.length > 80) return true;
             const t = title.toLowerCase();
@@ -490,10 +487,33 @@ export default function RadioPucciotto() {
               /\d{4}.*\d{4}/.test(t)
             );
           };
-          // Titoli/canali di musica indiana o asiatica spesso traslitterati in
+          // Titoli/canali di musica indiana, asiatica o africana spesso traslitterati in
           // caratteri latini (quindi invisibili a hasNonLatin, che guarda solo
-          // l'alfabeto): li intercettiamo per parole chiave esplicite.
-          const FOREIGN_KEYWORDS = /\b(bollywood|hindi|punjabi|bhojpuri|bhajan|desi|tamil|telugu|kannada|malayalam|marathi|gujarati|urdu song|pakistani song|k-?pop|kdrama|korean drama|mandarin|cantonese|chinese song|c-?pop|dangdut|indonesian song|thai song|vietnamese song|j-?pop|japanese song|anime opening|anime ending)\b/;
+          // l'alfabeto): li intercettiamo per parole chiave esplicite, a parola intera
+          // per non colpire titoli occidentali legittimi.
+          const FOREIGN_KEYWORDS = new RegExp("\\b(" + [
+            // India / subcontinente
+            "bollywood", "tollywood", "kollywood", "hindi", "punjabi", "bhojpuri", "bhajan",
+            "bhangra", "desi", "tamil", "telugu", "kannada", "malayalam", "marathi",
+            "gujarati", "odia", "assamese", "hindustani", "carnatic", "qawwali",
+            "urdu", "pakistani", "bangla", "bangladeshi", "nepali", "sinhala", "sri lankan",
+            "indian song", "indian songs", "indian music",
+            // Asia orientale / sud-est asiatico / Asia centrale
+            "k-?pop", "kdrama", "korean drama", "korean song", "korean music",
+            "mandarin", "cantonese", "chinese song", "chinese music", "c-?pop",
+            "j-?pop", "japanese song", "japanese music", "anime opening", "anime ending",
+            "dangdut", "indonesian song", "bahasa", "malay song", "tagalog", "filipino",
+            "pinoy", "thai song", "thai music", "vietnamese song", "vietnamese music",
+            "khmer", "myanmar song", "mongolian song", "kazakh", "uzbek",
+            "turkish song", "turkish music", "arabic", "arab song", "persian", "farsi",
+            "iranian", "afghan",
+            // Africa
+            "afrobeat", "afrobeats", "amapiano", "naija", "nigerian", "ghanaian",
+            "kenyan", "tanzanian", "ugandan", "congolese", "senegalese", "swahili",
+            "yoruba", "igbo", "hausa", "zulu", "xhosa", "amharic", "ethiopian",
+            "eritrean", "soukous", "bongo flava", "gqom", "kwaito", "highlife",
+            "azonto", "african song", "african music", "afro pop", "afropop",
+          ].join("|") + ")\\b");
           const isForeignLatin = (str) => FOREIGN_KEYWORDS.test(str.toLowerCase());
           return (data.items || [])
             .filter((it) => {
@@ -590,7 +610,16 @@ export default function RadioPucciotto() {
               suppressPauseRef.current = false; // arrivato un PLAYING vero: la transizione è conclusa
               if (suppressPauseTimeoutRef.current) { clearTimeout(suppressPauseTimeoutRef.current); suppressPauseTimeoutRef.current = null; }
               if (keepAliveLoopRef.current) {
-                keepAliveLoopRef.current = false; // consumato: era solo il loop di attesa
+                // NON consumiamo il flag: resta attivo per TUTTA l'attesa del brano
+                // successivo (viene azzerato solo dall'effetto radioTrack quando il brano
+                // vero viene caricato). Prima veniva azzerato al primo PLAYING del loop:
+                // così un SECONDO evento PLAYING dentro l'attesa (es. ripresa dopo un
+                // buffering) finiva nel ramo else, che lo SMUTAVA — ed è per questo che
+                // il "replay" del brano appena finito a volte si sentiva invece di
+                // restare silenzioso. In più, con il flag attivo anche i PAUSED del loop
+                // di attesa restano ignorati (vedi condizione del PAUSED più sotto),
+                // quindi la radio non si incastra più "in pausa" a fine brano.
+                ytPlayerRef.current?.mute?.(); // ribadisci il muto: l'attesa è SEMPRE silenziosa
               } else {
                 ytErrorCountRef.current = 0; // un brano è partito davvero: azzera il freno anti-raffica
                 // RETE DI SICUREZZA (radio pubblica): ogni volta che parte un brano VERO,
@@ -1433,7 +1462,7 @@ export default function RadioPucciotto() {
         audioRef.current.pause();
         audioRef.current.src = radioTrack.url;
         audioRef.current.load();
-        const elapsed = Math.max(0, (Date.now() - radioTrack.startedAt) / 1000 - LISTENER_SYNC_LAG_S);
+        const elapsed = (Date.now() - radioTrack.startedAt) / 1000;
         const startPlayback = () => {
           if (!audioRef.current) return;
           if (elapsed >= 0 && elapsed < (audioRef.current.duration || Infinity)) {
@@ -1453,7 +1482,7 @@ export default function RadioPucciotto() {
         // di ignorarlo come un semplice toggle di play/pausa.
         if (lastPublicStartedAtRef.current !== radioTrack.startedAt) {
           lastPublicStartedAtRef.current = radioTrack.startedAt;
-          const elapsed = Math.max(0, (Date.now() - radioTrack.startedAt) / 1000 - LISTENER_SYNC_LAG_S);
+          const elapsed = (Date.now() - radioTrack.startedAt) / 1000;
           // Riposiziona solo se lo scarto è sensibile (> 2s): piccole differenze (latenza,
           // ripubblicazioni per riallineamento) non devono far "saltare" il brano
           // avanti/indietro sull'ascoltatore.
@@ -1467,7 +1496,7 @@ export default function RadioPucciotto() {
       }
     } else if (radioTrack.videoId && ytReady && ytPlayerRef.current) {
       if (audioRef.current) audioRef.current.pause();
-      const elapsed = Math.max(0, (Date.now() - radioTrack.startedAt) / 1000 - LISTENER_SYNC_LAG_S);
+      const elapsed = Math.max(0, (Date.now() - radioTrack.startedAt) / 1000);
       if (isNewTrack) {
         lastPublicTrackKeyRef.current = trackKey;
         keepAliveLoopRef.current = false; // arriva il brano vero: non è più il loop di attesa
