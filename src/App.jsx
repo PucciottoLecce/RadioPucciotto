@@ -330,6 +330,11 @@ export default function RadioPucciotto() {
       a.load();
       return a;
     });
+    // Precarica anche i buffer Web Audio: la DECODIFICA non richiede alcun gesto utente
+    // (serve solo per far *partire* l'audio), quindi possiamo farla subito all'apertura.
+    // Così quando arriva uno spot il percorso Web Audio è già pronto, anche se l'utente
+    // ha premuto Play molto tempo prima o la scheda è finita in background.
+    AD_SPOTS.forEach((u) => loadSpotBuffer(u));
     return () => { preloaded.forEach((a) => { a.src = ""; }); };
   }, [isGestionale]);
 
@@ -1095,7 +1100,14 @@ export default function RadioPucciotto() {
     const ctx = getAudioCtx();
     if (!ctx) return Promise.resolve(false);
     const kick = ctx.state === "suspended" ? ctx.resume().catch(() => {}) : Promise.resolve();
-    return kick.then(() => loadSpotBuffer(url)).then((buf) => {
+    return kick.then(() => {
+      // Se il contesto NON è davvero attivo (resume fallito: nessun gesto utente ancora,
+      // o browser che lo tiene sospeso), NON fingere di suonare: prima si proseguiva lo
+      // stesso e lo spot "suonava" in silenzio, sembrando bloccato. Meglio dichiarare il
+      // fallimento e lasciare che il fallback <audio> ci provi.
+      if (ctx.state !== "running") return null;
+      return loadSpotBuffer(url);
+    }).then((buf) => {
       if (!buf) return false;
       stopSpotWA();
       const src = ctx.createBufferSource();
@@ -1331,14 +1343,35 @@ export default function RadioPucciotto() {
       };
 
       // PRIMA scelta: Web Audio (suona anche a scheda in background, niente "power saving"
-      // che lo mette in pausa). Se non è possibile (browser vecchio, decodifica fallita),
-      // FALLBACK al tag <audio> come prima.
+      // che lo mette in pausa). Se non è possibile (browser vecchio, contesto non attivo,
+      // decodifica fallita), FALLBACK al tag <audio>.
       playSpotWA(adTrack.url, vol, onEnd).then((ok) => {
         if (ok || !spotAudio) return;
-        if (spotAudio.src !== new URL(adTrack.url, window.location.href).href) spotAudio.src = adTrack.url;
+        if (spotAudio.src !== new URL(adTrack.url, window.location.href).href) {
+          spotAudio.src = adTrack.url;
+          spotAudio.load();
+        }
         spotAudio.currentTime = 0;
         spotAudio.volume = vol;
-        spotAudio.play().catch((e) => console.warn("Spot bloccato:", e.message));
+        // COME NELL'ORIGINALE: si aspetta che il file sia caricato PRIMA di chiamare
+        // play(). Chiamarlo subito dopo aver impostato la src (com'era diventato) faceva
+        // sì che, a scheda in background, il browser non sapesse ancora che il file ha una
+        // traccia audio e lo bloccasse come "video-only background media... paused to save
+        // power" — è esattamente l'errore visto in console. A file pronto, il browser sa
+        // che è audio vero e lo lascia suonare anche in background.
+        let started = false;
+        const startOnce = () => {
+          if (started) return;
+          started = true;
+          spotAudio.play().catch((e) => console.warn("Spot bloccato:", e.message));
+        };
+        if (spotAudio.readyState >= 4) startOnce();
+        else {
+          spotAudio.addEventListener("canplaythrough", startOnce, { once: true });
+          // Rete di sicurezza: se canplaythrough non arriva (connessioni instabili),
+          // dopo 5s si tenta comunque, come faceva il codice originale.
+          setTimeout(startOnce, 5000);
+        }
       });
     } else {
       lastStartedAdKeyRef.current = null;
