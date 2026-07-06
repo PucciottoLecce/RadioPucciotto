@@ -1160,35 +1160,38 @@ export default function RadioPucciotto() {
     }).catch(() => false);
   };
 
-  const unlockAdAudio = () => {
-    // Web Audio: al primo gesto utente (click su Play) sblocca/riprende il contesto e
-    // precarica gli spot dell'ascoltatore, così poi suonano subito e restano vivi anche a
-    // scheda in background. Fatto SEMPRE, anche se lo sblocco del tag <audio> qui sotto è
-    // già avvenuto.
+  // "Motore audio": porta il contesto Web Audio in stato attivo e avvia (una volta sola)
+  // il loop di silenzio perpetuo che impedisce al browser di sospenderlo nelle schede in
+  // background. Chiamato dal click su Play, dal PRIMO gesto qualsiasi sulla pagina (vedi
+  // effetto più sotto) e ad ogni ritorno della scheda in primo piano: prima era legato
+  // SOLO al click su Play, quindi se la radio partiva da sola (autoplay) senza che
+  // l'utente cliccasse nulla, il motore restava bloccato e lo spot in background falliva.
+  const kickAudioEngine = () => {
     const ctx = getAudioCtx();
-    if (ctx) {
-      // Avvia (una volta sola) il loop di silenzio perpetuo: tiene il contesto "attivo"
-      // per sempre, così il browser non lo sospende nelle schede in background e gli
-      // spot Web Audio partono sempre. Deve partire quando il contesto è davvero
-      // "running", quindi dopo il resume se era sospeso.
-      const startSilentLoop = () => {
-        if (silentLoopRef.current || ctx.state !== "running") return;
-        try {
-          const buf = ctx.createBuffer(1, Math.max(1, Math.floor(ctx.sampleRate / 2)), ctx.sampleRate);
-          const src = ctx.createBufferSource();
-          src.buffer = buf; // buffer di zeri = mezzo secondo di puro silenzio
-          src.loop = true;
-          const g = ctx.createGain();
-          g.gain.value = 0.0001; // non zero: a zero il browser lo considera "muto" e sospende comunque
-          src.connect(g).connect(ctx.destination);
-          src.start(0);
-          silentLoopRef.current = src;
-        } catch (_) { /* non supportato: pazienza, resta il comportamento di prima */ }
-      };
-      if (ctx.state === "suspended") ctx.resume().then(startSilentLoop).catch(() => {});
-      else startSilentLoop();
-      if (!isGestionale) AD_SPOTS.forEach((u) => loadSpotBuffer(u));
-    }
+    if (!ctx) return;
+    const startSilentLoop = () => {
+      if (silentLoopRef.current || ctx.state !== "running") return;
+      try {
+        const buf = ctx.createBuffer(1, Math.max(1, Math.floor(ctx.sampleRate / 2)), ctx.sampleRate);
+        const src = ctx.createBufferSource();
+        src.buffer = buf; // buffer di zeri = mezzo secondo di puro silenzio
+        src.loop = true;
+        const g = ctx.createGain();
+        g.gain.value = 0.0001; // non zero: a zero il browser lo considera "muto" e sospende comunque
+        src.connect(g).connect(ctx.destination);
+        src.start(0);
+        silentLoopRef.current = src;
+      } catch (_) { /* non supportato: pazienza, resta il comportamento di prima */ }
+    };
+    if (ctx.state === "suspended") ctx.resume().then(startSilentLoop).catch(() => {});
+    else startSilentLoop();
+    if (!isGestionale) AD_SPOTS.forEach((u) => loadSpotBuffer(u));
+  };
+
+  const unlockAdAudio = () => {
+    // Web Audio: sblocca/riprende il contesto e precarica gli spot dell'ascoltatore,
+    // così poi suonano subito e restano vivi anche a scheda in background.
+    kickAudioEngine();
     if (adAudioUnlockedRef.current || !adAudioRef.current) return;
     adAudioUnlockedRef.current = true;
     const a = adAudioRef.current;
@@ -1202,6 +1205,33 @@ export default function RadioPucciotto() {
     a.play().then(() => { a.pause(); a.currentTime = 0; a.muted = wasMuted; })
       .catch(() => { a.muted = wasMuted; });
   };
+
+  // Sblocco audio al PRIMO gesto qualsiasi sulla pagina (tocco, click ovunque, tasto):
+  // i browser sbloccano l'audio solo dopo un'interazione, ma non è detto che l'utente
+  // passi dal pulsante Play (la radio può partire da sola). Qualunque primo gesto ora
+  // sblocca sia il contesto Web Audio (con loop di silenzio) sia il tag <audio> degli
+  // spot. I listener si auto-rimuovono appena lo sblocco è riuscito davvero.
+  // In più, ad ogni ritorno della scheda in primo piano si riprova a riattivare il
+  // motore audio (dopo la prima interazione il browser lo consente anche senza gesto).
+  useEffect(() => {
+    const events = ["pointerdown", "touchstart", "keydown"];
+    const onGesture = () => {
+      unlockAdAudio();
+      const ctx = audioCtxRef.current;
+      if (ctx && ctx.state === "running" && silentLoopRef.current) {
+        events.forEach((n) => document.removeEventListener(n, onGesture));
+      }
+    };
+    const onVis = () => {
+      if (document.visibilityState === "visible") kickAudioEngine();
+    };
+    events.forEach((n) => document.addEventListener(n, onGesture, { passive: true }));
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      events.forEach((n) => document.removeEventListener(n, onGesture));
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, []);
 
   const playSpotInBackground = () => {
     // Niente controllo su isMutedRef: il muto generale del gestionale silenzia solo
