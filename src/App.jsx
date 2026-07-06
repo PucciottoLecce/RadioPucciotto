@@ -9,6 +9,13 @@ const BLACK = "#1a1a1a";
 const CREAM = "#faf7f4";
 const COLOR_PALETTE = [RED, "#e67e22", "#2c3e50", "#27ae60", "#8e44ad", "#d35400"];
 const MY_SONGS_COLOR = "#c0392b";
+// Margine di sicurezza (secondi) con cui l'ascoltatore parte LEGGERMENTE indietro rispetto
+// alla posizione calcolata dal gestionale. Il gestionale segna startedAt al cambio brano,
+// ma il suo video parte davvero un istante dopo (caricamento/buffer): senza margine gli
+// ascoltatori risultano un filo AVANTI e arrivano a fine brano prima, innescando il breve
+// "replay" del loop di attesa. Con questo piccolo ritardo restano appena dietro la diretta
+// (impercettibile per una radio) e la transizione tra i brani resta pulita.
+const LISTENER_SYNC_LAG_S = 1.5;
 
 const FALLBACK_TRACKS = [
   { id: 1, title: "Notte Elettrica", artist: "SoundHelix", category: "Elettronica", url: "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3", color: "#FF6B4A", isCustom: false },
@@ -556,12 +563,6 @@ export default function RadioPucciotto() {
         events: {
           onReady: () => { ytPlayerRef.current.setVolume(volume * 100); setYtReady(true); },
           onStateChange: (e) => {
-            // ─── DIAGNOSTICA (temporanea): stampa in console ogni cambio di stato del
-            // player, con l'orario. Serve a capire dal vivo cosa causa i "spezzoni".
-            if (isGestionale) {
-              const N = { "-1": "NON AVVIATO", 0: "FINITO", 1: "IN RIPRODUZIONE", 2: "PAUSA", 3: "BUFFERING", 5: "IN CODA" };
-              console.log("🔴 RP stato:", N[e.data] ?? e.data, "—", new Date().toLocaleTimeString());
-            }
             // goNext() (avanzamento al brano successivo) deve girare SOLO nel gestionale:
             // in vista pubblica l'avanzamento è governato da Firebase, non dalla fine del
             // video locale, altrimenti si disallineerebbe la trasmissione.
@@ -627,7 +628,6 @@ export default function RadioPucciotto() {
           // l'ordine, si ferma e ricomincia, non si sente nulla").
           onError: (e) => {
             if (!isGestionale) return;
-            console.log("🔴 RP errore video, codice:", e?.data, "— (101/150 = embed disabilitato, 100 = rimosso, 2/5 = id/player)");
             const now = Date.now();
             // Errori entro 12s l'uno dall'altro = "raffica": li contiamo. Errori isolati
             // (>12s) ripartono da 1, così un video morto ogni tanto si salta senza problemi.
@@ -1274,23 +1274,6 @@ export default function RadioPucciotto() {
     return () => unsub();
   }, [isGestionale]);
 
-  // DIAGNOSTICA (temporanea): traccia gli eventi dell'audio dello SPOT, per capire perché
-  // gli spot vanno "a spezzoni". Legenda: waiting/stalled/suspend = buffering o problema
-  // di rete/file; coppie pause→play = qualcosa lo ferma e lo fa ripartire; error = il file
-  // dello spot non si carica; seeking/emptied = la sorgente viene cambiata o riavvolta.
-  useEffect(() => {
-    const a = adAudioRef.current;
-    if (!a) return;
-    const stamp = () => `${a.currentTime.toFixed(1)}s/${isFinite(a.duration) ? a.duration.toFixed(1) : "?"}s`;
-    const names = ["loadstart", "play", "playing", "pause", "waiting", "stalled", "suspend", "ended", "error", "seeking", "emptied"];
-    const hs = names.map((n) => {
-      const h = () => console.log("🟡 RP spot:", n, stamp(), new Date().toLocaleTimeString());
-      a.addEventListener(n, h);
-      return [n, h];
-    });
-    return () => hs.forEach(([n, h]) => a.removeEventListener(n, h));
-  }, []);
-
   // Vista radio pubblica: gestione dello spot, riscritta SEMPLICE e INDIPENDENTE.
   // Lo spot è un overlay a sé: parte sempre dall'inizio, suona fino alla fine, e la sua
   // riproduzione NON viene più disturbata dai cambi di canzone (per questo l'effetto non
@@ -1417,7 +1400,7 @@ export default function RadioPucciotto() {
         audioRef.current.pause();
         audioRef.current.src = radioTrack.url;
         audioRef.current.load();
-        const elapsed = (Date.now() - radioTrack.startedAt) / 1000;
+        const elapsed = Math.max(0, (Date.now() - radioTrack.startedAt) / 1000 - LISTENER_SYNC_LAG_S);
         const startPlayback = () => {
           if (!audioRef.current) return;
           if (elapsed >= 0 && elapsed < (audioRef.current.duration || Infinity)) {
@@ -1437,7 +1420,7 @@ export default function RadioPucciotto() {
         // di ignorarlo come un semplice toggle di play/pausa.
         if (lastPublicStartedAtRef.current !== radioTrack.startedAt) {
           lastPublicStartedAtRef.current = radioTrack.startedAt;
-          const elapsed = (Date.now() - radioTrack.startedAt) / 1000;
+          const elapsed = Math.max(0, (Date.now() - radioTrack.startedAt) / 1000 - LISTENER_SYNC_LAG_S);
           // Riposiziona solo se lo scarto è sensibile (> 2s): piccole differenze (latenza,
           // ripubblicazioni per riallineamento) non devono far "saltare" il brano
           // avanti/indietro sull'ascoltatore.
@@ -1451,7 +1434,7 @@ export default function RadioPucciotto() {
       }
     } else if (radioTrack.videoId && ytReady && ytPlayerRef.current) {
       if (audioRef.current) audioRef.current.pause();
-      const elapsed = Math.max(0, (Date.now() - radioTrack.startedAt) / 1000);
+      const elapsed = Math.max(0, (Date.now() - radioTrack.startedAt) / 1000 - LISTENER_SYNC_LAG_S);
       if (isNewTrack) {
         lastPublicTrackKeyRef.current = trackKey;
         keepAliveLoopRef.current = false; // arriva il brano vero: non è più il loop di attesa
