@@ -152,28 +152,36 @@ export default function RadioPucciotto() {
   const spotBuffersRef = useRef({});   // url -> AudioBuffer decodificato
   const spotSourceRef = useRef(null);  // sorgente Web Audio dello spot in corso
   const spotGainRef = useRef(null);    // nodo volume dello spot in corso
+  // Loop di silenzio PERPETUO sul contesto Web Audio (avviato al primo click su Play):
+  // un contesto che resta in silenzio in una scheda in background può venire sospeso dal
+  // browser, e al momento dello spot non riparte (lo spot cadeva sul fallback <audio>,
+  // che in background viene bloccato dal risparmio energia). Con questo loop il contesto
+  // non è mai "in silenzio", quindi non viene sospeso e lo spot parte sempre.
+  const silentLoopRef = useRef(null);
   const wakeLockRef = useRef(null);
-  // "Ancora audio" per il gestionale: un audio nativo reale (non nell'iframe
-  // YouTube) che suona in loop, quasi impercettibile, mentre si è on air. Il player
+  // "Ancora audio": un audio nativo reale (non nell'iframe YouTube) che suona in loop,
+  // quasi impercettibile (è un WAV di puro silenzio), mentre si è on air. Il player
   // YouTube è un iframe di terze parti, e i browser lo rallentano/sospendono quando
   // si cambia tab — Wake Lock e Media Session non bastano a evitarlo, perché l'audio
   // "vero" nasce dentro l'iframe, non nella pagina. Un <audio> nativo che suona
   // davvero fa sì che il browser riconosca la tab come "audio attivo" e la penalizzi
-  // molto meno in background, aiutando anche l'iframe YouTube accanto a restare vivo.
+  // molto meno in background. ATTIVA ANCHE PER L'ASCOLTATORE (prima solo gestionale):
+  // senza un media "udibile" nel frame principale, in background il browser bloccava
+  // il play() dell'audio degli SPOT come "video-only background media... paused to
+  // save power" — l'iframe YouTube non conta, perché è un altro dominio/frame.
   const keepAliveAudioRef = useRef(null);
   useEffect(() => {
-    if (!isGestionale) return;
     const a = new Audio("data:audio/wav;base64,UklGRtQEAABXQVZFZm10IBAAAAABAAEAoA8AAKAPAAABAAgAZGF0YbAEAACAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIA=");
     a.loop = true;
     a.volume = 0.01;
     keepAliveAudioRef.current = a;
     return () => { a.pause(); keepAliveAudioRef.current = null; };
-  }, [isGestionale]);
+  }, []);
   useEffect(() => {
-    if (!isGestionale || !keepAliveAudioRef.current) return;
+    if (!keepAliveAudioRef.current) return;
     if (isPlaying) keepAliveAudioRef.current.play().catch(() => {});
     else keepAliveAudioRef.current.pause();
-  }, [isPlaying, isGestionale]);
+  }, [isPlaying]);
   const ytPlayerRef = useRef(null);
   const [ytReady, setYtReady] = useState(false);
 
@@ -1159,7 +1167,26 @@ export default function RadioPucciotto() {
     // già avvenuto.
     const ctx = getAudioCtx();
     if (ctx) {
-      if (ctx.state === "suspended") ctx.resume().catch(() => {});
+      // Avvia (una volta sola) il loop di silenzio perpetuo: tiene il contesto "attivo"
+      // per sempre, così il browser non lo sospende nelle schede in background e gli
+      // spot Web Audio partono sempre. Deve partire quando il contesto è davvero
+      // "running", quindi dopo il resume se era sospeso.
+      const startSilentLoop = () => {
+        if (silentLoopRef.current || ctx.state !== "running") return;
+        try {
+          const buf = ctx.createBuffer(1, Math.max(1, Math.floor(ctx.sampleRate / 2)), ctx.sampleRate);
+          const src = ctx.createBufferSource();
+          src.buffer = buf; // buffer di zeri = mezzo secondo di puro silenzio
+          src.loop = true;
+          const g = ctx.createGain();
+          g.gain.value = 0.0001; // non zero: a zero il browser lo considera "muto" e sospende comunque
+          src.connect(g).connect(ctx.destination);
+          src.start(0);
+          silentLoopRef.current = src;
+        } catch (_) { /* non supportato: pazienza, resta il comportamento di prima */ }
+      };
+      if (ctx.state === "suspended") ctx.resume().then(startSilentLoop).catch(() => {});
+      else startSilentLoop();
       if (!isGestionale) AD_SPOTS.forEach((u) => loadSpotBuffer(u));
     }
     if (adAudioUnlockedRef.current || !adAudioRef.current) return;
