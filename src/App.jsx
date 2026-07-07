@@ -323,7 +323,8 @@ export default function RadioPucciotto() {
   // all'inizio. Precaricando, quando lo spot parte davvero il file è già in cache
   // del browser e la riproduzione può iniziare quasi istantaneamente.
   useEffect(() => {
-    if (isGestionale) return;
+    // Precarica per TUTTI (anche gestionale): così quando uno spot parte, il file è già
+    // in cache e il play può avvenire a file pronto anche a scheda in background.
     const preloaded = AD_SPOTS.map((url) => {
       const a = new Audio();
       a.preload = "auto";
@@ -331,11 +332,12 @@ export default function RadioPucciotto() {
       a.load();
       return a;
     });
-    // Precarica anche i buffer Web Audio: la DECODIFICA non richiede alcun gesto utente
-    // (serve solo per far *partire* l'audio), quindi possiamo farla subito all'apertura.
-    // Così quando arriva uno spot il percorso Web Audio è già pronto, anche se l'utente
-    // ha premuto Play molto tempo prima o la scheda è finita in background.
-    AD_SPOTS.forEach((u) => loadSpotBuffer(u));
+    // Precarica anche i buffer Web Audio (solo ascoltatore): la DECODIFICA non richiede
+    // alcun gesto utente (serve solo per far *partire* l'audio), quindi possiamo farla
+    // subito all'apertura. Così quando arriva uno spot il percorso Web Audio è già
+    // pronto, anche se l'utente ha premuto Play molto tempo prima o la scheda è finita
+    // in background.
+    if (!isGestionale) AD_SPOTS.forEach((u) => loadSpotBuffer(u));
     return () => { preloaded.forEach((a) => { a.src = ""; }); };
   }, [isGestionale]);
 
@@ -1255,6 +1257,7 @@ export default function RadioPucciotto() {
     isDuckingRef.current = true;
     applyMusicVolume();
     spotAudio.src = spotUrl;
+    spotAudio.load();
     spotAudio.currentTime = 0;
     // Volume dello spot proporzionale al volume generale (niente più +0.2 fisso):
     // a volume generale basso/zero, lo spot deve essere basso/zero anch'esso.
@@ -1268,11 +1271,31 @@ export default function RadioPucciotto() {
       applyMusicVolume(); // torna al volume ATTUALE (non a quello dell'avvio dello spot)
       publishAdPlaying(null);
     };
-    const finish = armSpotRestore(spotAudio, restore);
-    const p = spotAudio.play();
-    // Se il browser rifiuta il play (autoplay bloccato) ripristiniamo subito: niente
-    // spot, ma almeno la musica non resta abbassata per sempre.
-    if (p && p.catch) p.catch((e) => { console.warn("Spot bloccato:", e.message); finish(); });
+    armSpotRestore(spotAudio, restore);
+    // Aspetta che il file sia caricato PRIMA di chiamare play(): chiamarlo subito dopo
+    // aver impostato la src, con la scheda del gestionale in background, faceva scattare
+    // il blocco "video-only background media... paused to save power" (il browser non sa
+    // ancora che il file ha una traccia audio). A file pronto, di solito suona anche in
+    // background.
+    let started = false;
+    const startLocal = () => {
+      if (started) return;
+      started = true;
+      const p = spotAudio.play();
+      // IMPORTANTE: se il play LOCALE viene comunque rifiutato (scheda in background),
+      // NON dobbiamo spegnere lo spot su Firebase: gli ascoltatori lo stanno sentendo!
+      // Prima qui veniva chiamato finish() -> restore() -> publishAdPlaying(null), che
+      // TAGLIAVA lo spot a tutta la radio appena il monitor locale del gestionale era
+      // bloccato. Ora il fallimento locale viene solo registrato: al ripristino (e alla
+      // pubblicazione del null) ci pensano i timer di armSpotRestore, calibrati sulla
+      // durata reale dello spot, così gli ascoltatori lo sentono per intero.
+      if (p && p.catch) p.catch((e) => console.warn("Spot non udibile in locale (la radio lo trasmette comunque):", e.message));
+    };
+    if (spotAudio.readyState >= 4) startLocal();
+    else {
+      spotAudio.addEventListener("canplaythrough", startLocal, { once: true });
+      setTimeout(startLocal, 5000);
+    }
   };
 
   // Gestionale: pubblica su Firebase ogni volta che current cambia, o quando si preme Play
