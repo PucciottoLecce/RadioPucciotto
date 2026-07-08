@@ -862,12 +862,11 @@ export default function RadioPucciotto() {
       if (c && !c.isCustom) {
         armSuppressPause();
         ytPlayerRef.current?.playVideo?.();
-      } else if (audioRef.current && audioRef.current.paused) {
+      } else if (audioRef.current && audioRef.current.paused && !audioRef.current.ended) {
+        // !ended: un mp3 arrivato alla FINE non va ri-avviato (play() su "ended"
+        // ricomincia da capo — altra via del "la ripete un paio di volte" su Giulia).
         safePlayAudio(audioRef.current).catch(() => {});
       }
-      // (Rimossa) la ripubblicazione della posizione al ritorno in primo piano: era una
-      // modifica speculativa che aggiungeva scritture su Firebase senza un beneficio
-      // chiaro. Il riallineamento resta gestito dalla soglia anti-salto lato ascoltatore.
     };
     document.addEventListener("visibilitychange", onVis);
     return () => document.removeEventListener("visibilitychange", onVis);
@@ -953,6 +952,10 @@ export default function RadioPucciotto() {
     if (!audioRef.current) return;
     if (isPlaying) {
       shouldPlayRef.current = true;
+      // NON ri-avviare un mp3 già FINITO: play() su un elemento "ended" ricomincia da
+      // capo — era una delle vie del "la ripete un paio di volte" su Giulia. Al brano
+      // successivo pensa goNext/il cambio traccia (che sostituisce la src e azzera ended).
+      if (audioRef.current.ended) return;
       const p = safePlayAudio(audioRef.current);
       if (p && p.then) {
         p.then(() => setStatus("In riproduzione"))
@@ -1321,6 +1324,29 @@ export default function RadioPucciotto() {
     publishNowPlaying(current, isNewTrack ? 0 : progress);
   }, [current?.id, isPlaying, isGestionale]);
 
+  // Battito di sincronizzazione ("heartbeat"): ogni 15s il gestionale ripubblica il brano
+  // corrente con la sua POSIZIONE REALE di riproduzione. Serve perché il gestionale, tra
+  // caricamenti, buffering e pubblicità di YouTube, resta indietro rispetto all'orologio,
+  // mentre gli ascoltatori (che calcolano la posizione da startedAt) seguono l'orologio:
+  // senza correzione la radio finiva sempre più AVANTI del gestionale. Gli ascoltatori
+  // applicano il battito solo se lo scarto supera i 5 secondi (vedi soglie più sotto),
+  // quindi niente micro-salti continui: solo correzioni vere quando serve.
+  useEffect(() => {
+    if (!isGestionale) return;
+    const id = setInterval(() => {
+      if (!isPlayingRef.current) return;
+      const c = currentRef.current;
+      if (!c) return;
+      const t = c.isCustom
+        ? (audioRef.current?.currentTime || 0)
+        : (ytPlayerRef.current?.getCurrentTime?.() || 0);
+      // Niente battito nei primissimi secondi: durante il caricamento la posizione
+      // riportata dal player è instabile e pubblicherebbe valori sballati.
+      if (t > 3) publishNowPlaying(c, t);
+    }, 15000);
+    return () => clearInterval(id);
+  }, [isGestionale]);
+
   // Vista radio pubblica: ascolta Firebase in tempo reale, è l'UNICA fonte del brano in onda.
   // Aggiorna solo lo stato: il caricamento nel player YT / <audio> è gestito da un effetto
   // dedicato più sotto, che reagisce a radioTrack e sa gestire sia YouTube che brani custom.
@@ -1556,18 +1582,26 @@ export default function RadioPucciotto() {
             .catch(() => {});
         };
         audioRef.current.addEventListener("loadedmetadata", startPlayback, { once: true });
+      } else if (audioRef.current.ended) {
+        // Il nostro mp3 è GIÀ arrivato alla fine (l'ascoltatore è un filo avanti alla
+        // diretta): restiamo FERMI in silenzio ad aspettare il brano successivo da
+        // Firebase. Fondamentale: play() su un <audio> "ended" RICOMINCIA DA CAPO, e
+        // seekare all'indietro rientra nel brano appena finito — senza questa guardia,
+        // i battiti di posizione sullo stesso brano riavviavano/facevano risentire la
+        // traccia appena conclusa (il replay/blocco visto su "Giulia").
+        lastPublicStartedAtRef.current = radioTrack.startedAt;
       } else {
         // Stesso brano: se lo startedAt è cambiato, il gestionale ha fatto un seek
-        // manuale (avanti/indietro) — riposizioniamo l'audio sul nuovo punto invece
-        // di ignorarlo come un semplice toggle di play/pausa.
+        // manuale (avanti/indietro) o è arrivato un battito di posizione — riposizioniamo
+        // l'audio sul nuovo punto invece di ignorarlo come un semplice toggle di play/pausa.
         if (lastPublicStartedAtRef.current !== radioTrack.startedAt) {
           lastPublicStartedAtRef.current = radioTrack.startedAt;
           const elapsed = (Date.now() - radioTrack.startedAt) / 1000;
-          // Riposiziona solo se lo scarto è sensibile (> 2s): piccole differenze (latenza,
-          // ripubblicazioni per riallineamento) non devono far "saltare" il brano
-          // avanti/indietro sull'ascoltatore.
+          // Riposiziona solo se lo scarto è sensibile (> 5s): i battiti di posizione ogni
+          // 15s e le piccole differenze di latenza non devono far "saltare" il brano
+          // avanti/indietro sull'ascoltatore — solo correzioni vere.
           const drift = Math.abs(elapsed - (audioRef.current.currentTime || 0));
-          if (elapsed >= 0 && elapsed < (audioRef.current.duration || Infinity) && drift > 2) {
+          if (elapsed >= 0 && elapsed < (audioRef.current.duration || Infinity) && drift > 5) {
             audioRef.current.currentTime = elapsed;
           }
         }
@@ -1587,17 +1621,22 @@ export default function RadioPucciotto() {
         // loadVideoById avvia sempre la riproduzione; se il browser blocca l'autoplay
         // (mancanza di interazione utente), onStateChange non passerà mai a PLAYING e
         // isPlaying resterà false: l'utente vedrà comunque il tasto Play pronto.
+      } else if (keepAliveLoopRef.current) {
+        // Siamo nel loop di attesa MUTO a fine brano: il nostro video è già finito, ma il
+        // gestionale sta ancora finendo lo stesso brano e i suoi battiti di posizione
+        // (heartbeat) arrivano ancora con questa traccia. NON dobbiamo rientrare nel
+        // brano appena concluso (si risentirebbe la coda: il "replay"): restiamo in
+        // attesa silenziosa finché non arriva il brano NUOVO (ramo isNewTrack sopra).
       } else if (isPlaying) {
-        // Ogni volta che l'utente (ri)avvia manualmente l'ascolto ci risincronizziamo
-        // SEMPRE al punto esatto in cui si trova la diretta in questo istante — non a
-        // dove il video si era fermato — così non parte più "da un punto diverso".
-        keepAliveLoopRef.current = false;
+        // Risincronizzazione sul punto reale della diretta: sia quando l'utente (ri)avvia
+        // manualmente l'ascolto, sia quando arriva un battito di posizione dal gestionale.
         ytPlayerRef.current.unMute?.();
         applyMusicVolume();
-        // Riposiziona solo se lo scarto dal punto live è sensibile (> 2s): evita micro-salti
-        // ad ogni riallineamento/ripubblicazione (che davano l'effetto "torna indietro").
+        // Riposiziona solo se lo scarto è sensibile (> 5s): i battiti ogni 15s non devono
+        // produrre micro-salti continui, solo correzioni vere (es. il gestionale rimasto
+        // indietro per pubblicità/buffering, con la radio scappata avanti).
         const cur = ytPlayerRef.current.getCurrentTime?.() || 0;
-        if (Math.abs(elapsed - cur) > 2) ytPlayerRef.current.seekTo(elapsed, true);
+        if (Math.abs(elapsed - cur) > 5) ytPlayerRef.current.seekTo(elapsed, true);
         ytPlayerRef.current.playVideo();
       } else {
         ytPlayerRef.current.pauseVideo();
@@ -1723,8 +1762,12 @@ export default function RadioPucciotto() {
         Radio Pucciotto — musica © dei rispettivi titolari, via YouTube
       </footer>
 
+      {/* NIENTE onEnded che spegne isPlaying: quando un mp3 finisce (l'ascoltatore è
+          spesso un filo avanti alla diretta) restiamo "in play" in silenzio ad aspettare
+          il brano successivo da Firebase — esattamente come fa il player YouTube col suo
+          loop di attesa. Prima qui c'era setIsPlaying(false): la radio si fermava a fine
+          traccia (es. "Giulia") e l'ascoltatore doveva ripremere Play a mano. */}
       <audio ref={audioRef} onTimeUpdate={handleTimeUpdate}
-        onEnded={() => setIsPlaying(false)}
         onError={() => setStatus("Errore")} />
       <audio ref={adAudioRef} />
     </div>
