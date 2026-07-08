@@ -247,20 +247,6 @@ export default function RadioPucciotto() {
   // all'avvio/fine di uno spot. Prima questi due casi erano gestiti in punti diversi con
   // valori "fotografati", e bastava un ripristino mancato per lasciare la musica abbassata.
   const applyMusicVolume = () => {
-    // "QUASI-MUTO" del gestionale: quando il gestore preme Muto NON silenziamo davvero
-    // la scheda (niente flag muted, niente volume 0) ma portiamo il volume a un filo
-    // quasi impercettibile (1%). Motivo: una scheda COMPLETAMENTE silenziosa in
-    // background viene addormentata/throttlata dal browser (Edge "schede in sospensione",
-    // timer ridotti al minimo) — e siccome il gestionale è il MOTORE della radio,
-    // quando si addormenta la trasmissione si ferma per tutti gli ascoltatori finché
-    // non si torna sulla pagina. Una scheda che "suona" (anche pochissimo) viene invece
-    // tenuta sveglia per regola dai browser. È il compromesso: muto praticamente totale
-    // per l'orecchio, ma la radio non muore mai.
-    if (isGestionale && isMutedRef.current) {
-      if (audioRef.current) audioRef.current.volume = 0.01;
-      ytPlayerRef.current?.setVolume?.(1);
-      return;
-    }
     const factor = isDuckingRef.current ? 0.5 : 1;
     const v = volumeRef.current;
     if (audioRef.current) audioRef.current.volume = Math.max(0, Math.min(1, v * factor));
@@ -763,16 +749,15 @@ export default function RadioPucciotto() {
     return () => clearInterval(id);
   }, [adEvery2MinEnabled, adIntervalMinutes, isGestionale]);
 
-  // Applica il "muto generale" del gestionale. IMPORTANTE: per la MUSICA non si usa più
-  // il mute vero del browser né il volume 0, ma il "quasi-muto" all'1% gestito da
-  // applyMusicVolume (vedi commento lì): una scheda del tutto silenziosa in background
-  // viene addormentata dal browser e la radio si ferma per tutti. Lo SPOT locale invece
-  // può restare mutato davvero: è la musica, sempre in onda, a tenere viva la scheda.
+  // Applica il mute generale agli elementi audio reali: musica (HTML5 o YouTube) e spot.
+  // Questo copre anche l'eventuale spot già in corso nel momento in cui si preme mute.
   useEffect(() => {
-    if (audioRef.current) audioRef.current.muted = false;
-    ytPlayerRef.current?.unMute?.();
+    if (audioRef.current) audioRef.current.muted = isMuted;
     if (adAudioRef.current) adAudioRef.current.muted = isMuted;
-    applyMusicVolume();
+    if (ytPlayerRef.current) {
+      if (isMuted) ytPlayerRef.current.mute?.();
+      else ytPlayerRef.current.unMute?.();
+    }
   }, [isMuted]);
 
   useEffect(() => {
@@ -882,19 +867,6 @@ export default function RadioPucciotto() {
         // ricomincia da capo — altra via del "la ripete un paio di volte" su Giulia).
         safePlayAudio(audioRef.current).catch(() => {});
       }
-      // Battito di posizione IMMEDIATO al risveglio: se la scheda era stata
-      // addormentata/throttlata dal browser, gli ascoltatori sono rimasti senza
-      // aggiornamenti — appena il player ha ripreso, ripubblichiamo la posizione reale
-      // invece di lasciarli sfasati fino al prossimo battito periodico (fino a 15s).
-      setTimeout(() => {
-        if (!isPlayingRef.current) return;
-        const cur = currentRef.current;
-        if (!cur) return;
-        const t = cur.isCustom
-          ? (audioRef.current?.currentTime || 0)
-          : (ytPlayerRef.current?.getCurrentTime?.() || 0);
-        if (t > 3) publishNowPlaying(cur, t);
-      }, 1200);
     };
     document.addEventListener("visibilitychange", onVis);
     return () => document.removeEventListener("visibilitychange", onVis);
