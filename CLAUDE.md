@@ -17,6 +17,9 @@ proprietario **in italiano**, in modo semplice e senza gergo tecnico.
   `settings/adVolume` (volume spot).
 - Brani "miei": `public/my-song/index.json` + mp3. Spot audio: `public/ads/`.
 - Spot: solo il meccanismo "ogni N minuti" (quello "ogni 3 canzoni" è stato tolto).
+  Vanno in onda **a rotazione fissa** nell'ordine di `AD_SPOTS` (1 → 2 → 3 → 1 …),
+  con la posizione ricordata nel browser del gestionale (`rp_next_spot`). Per
+  aggiungere uno spot: file in `public/ads/` + una riga in fondo ad `AD_SPOTS`.
 
 ## Decisioni del proprietario (da rispettare)
 
@@ -55,6 +58,9 @@ proprietario **in italiano**, in modo semplice e senza gergo tecnico.
   del timer. Verificati in prova: tempi degli spot, musica abbassata al 50% durante
   lo spot, volume spot = volume generale × volume spot (gestionale e ascoltatori),
   ripristino a fine spot.
+- **PR #5**: spot a rotazione fissa 1 → 2 → 3 → 1 … (prima erano scelti a caso,
+  evitando solo di ripetere l'ultimo); la rotazione riprende da dove era rimasta
+  anche dopo un ricaricamento.
 - **Per tornare indietro:** fare il revert del commit di merge della PR su `main`
   (Cloudflare ripubblica da solo).
 - La chiave della cache della playlist nel browser (`CACHE_KEY`, ora
