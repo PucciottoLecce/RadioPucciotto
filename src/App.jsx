@@ -448,7 +448,7 @@ export default function RadioPucciotto() {
 
     // Chiave nuova: la cache vecchia conteneva la playlist globale per generi (con i
     // brani indiani/russi ecc.) e non deve essere riusata.
-    const CACHE_KEY = "rp_yt_cache_eu_am_v3"; // v3: esclusi i video non incorporabili, niente Germania
+    const CACHE_KEY = "rp_yt_cache_eu_am_v4"; // v4: solo brani riproducibili in Italia, niente Germania
     // Alzata da 4 a 18 ore: con la chiave condivisa tra tutti i visitatori, ogni
     // scadenza cache moltiplicata per tanti browser è proprio ciò che genera le
     // raffiche che fanno scattare rateLimitExceeded (vedi anche il fix sotto sullo
@@ -644,17 +644,52 @@ export default function RadioPucciotto() {
       return Promise.all(promises);
     };
 
+    // Controllo finale di riproducibilità, su TUTTI i brani (ricerca + classifica): il
+    // solo "incorporabile" non basta. Un video può esserlo ed essere comunque bloccato in
+    // Italia (capita coi brani delle classifiche USA/Messico), vietato ai minori (negli
+    // embed non parte) o non pubblico: nel player darebbe errore e verrebbe saltato.
+    // Una richiesta ogni 50 brani, 1 unità di quota l'una. Se il controllo fallisce
+    // teniamo i brani così come sono, invece di restare senza playlist.
+    const PLAY_REGION = "IT";
+    const isPlayableHere = (v) => {
+      if (v.status?.embeddable === false) return false;
+      if (v.status?.privacyStatus && v.status.privacyStatus !== "public") return false;
+      if (v.contentDetails?.contentRating?.ytRating === "ytAgeRestricted") return false;
+      const rr = v.contentDetails?.regionRestriction;
+      if (rr?.allowed && !rr.allowed.includes(PLAY_REGION)) return false;
+      if (rr?.blocked && rr.blocked.includes(PLAY_REGION)) return false;
+      return true;
+    };
+    const keepPlayable = (list) => {
+      const chunks = [];
+      for (let i = 0; i < list.length; i += 50) chunks.push(list.slice(i, i + 50));
+      return Promise.all(chunks.map((chunk) => {
+        const ids = chunk.map((t) => t.videoId).join(",");
+        const url = `https://www.googleapis.com/youtube/v3/videos?part=status,contentDetails&id=${ids}&maxResults=50&key=${YOUTUBE_API_KEY}`;
+        return fetchJsonWithRetry(url, "verifica")
+          .then((data) => {
+            const okIds = new Set((data.items || []).filter(isPlayableHere).map((v) => v.id));
+            // Un id che non torna proprio nella risposta è un video rimosso/privato.
+            return chunk.filter((t) => okIds.has(t.videoId));
+          })
+          .catch((err) => { console.warn(err.message || err); return chunk; });
+      })).then((parts) => parts.flat());
+    };
+
     runStaggered(SOURCES, fetchSlice, STAGGER_MS)
       .then((arrays) => {
         const mapped = arrays.flat();
         if (!mapped.length) throw new Error("Nessun brano trovato");
         // Rimuove duplicati per videoId (stesso video in più paesi o classifiche)
         const seen = new Set();
-        const deduped = mapped.filter((t) => {
+        return keepPlayable(mapped.filter((t) => {
           if (seen.has(t.videoId)) return false;
           seen.add(t.videoId);
           return true;
-        });
+        }));
+      })
+      .then((deduped) => {
+        if (!deduped.length) throw new Error("Nessun brano riproducibile trovato");
         const label = "🔥 Più ascoltati in Europa, America e America Latina: del momento e di sempre";
         // Salva in cache
         try {
