@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useMemo } from "react";
 import { Play, Pause, SkipForward, SkipBack, Volume2, VolumeX, Trash2, Shuffle, Music, Check } from "lucide-react";
 import { db } from "./firebase.js";
-import { ref, set, onValue, onDisconnect } from "firebase/database";
+import { ref, set, get, onValue, onDisconnect } from "firebase/database";
 
 const RED   = "#c0392b";
 const WHITE = "#ffffff";
@@ -87,10 +87,23 @@ export default function RadioPucciotto() {
   const [adVolume, setAdVolume] = useState(0.7);
   // Attiva/disattiva l'unico meccanismo di spot rimasto: quello periodico "ogni N minuti"
   // in sottofondo (sopra la musica). Lo spot legato al numero di canzoni è stato rimosso.
-  const [adEvery2MinEnabled, setAdEvery2MinEnabled] = useState(true);
+  // Questa impostazione e i minuti qui sotto vengono ricordati dal browser del gestionale
+  // (localStorage): prima tornavano a "attivo, ogni 2 minuti" ad ogni ricaricamento.
+  const [adEvery2MinEnabled, setAdEvery2MinEnabled] = useState(() => {
+    try { const v = localStorage.getItem("rp_ad_enabled"); return v === null ? true : v === "1"; } catch (_) { return true; }
+  });
   // Minuti configurabili tra uno spot "in sottofondo" e il successivo (prima era
   // fisso a 2 minuti, non modificabile dal gestionale).
-  const [adIntervalMinutes, setAdIntervalMinutes] = useState(2);
+  const [adIntervalMinutes, setAdIntervalMinutes] = useState(() => {
+    try { const v = parseInt(localStorage.getItem("rp_ad_minutes"), 10); return v >= 1 ? v : 2; } catch (_) { return 2; }
+  });
+  useEffect(() => {
+    if (!isGestionale) return;
+    try {
+      localStorage.setItem("rp_ad_enabled", adEvery2MinEnabled ? "1" : "0");
+      localStorage.setItem("rp_ad_minutes", String(adIntervalMinutes));
+    } catch (_) { /* memoria del browser non disponibile: pazienza, restano i valori in uso */ }
+  }, [adEvery2MinEnabled, adIntervalMinutes, isGestionale]);
   const [adLine, setAdLine] = useState(0);
   const [status, setStatus] = useState("Pronto");
   const [shuffleMode, setShuffleMode] = useState(false);
@@ -201,6 +214,12 @@ export default function RadioPucciotto() {
   // permette di distinguere quel caso e riposizionare l'audio, invece di ignorarlo
   // come un semplice cambio di isPlaying.
   const lastPublicStartedAtRef = useRef(null);
+  // Vista pubblica: true se l'ASCOLTATORE ha messo in pausa di sua scelta (pulsante o
+  // comando di pausa del sistema). Serve a non farlo ripartire da solo al brano
+  // successivo: prima ogni nuovo brano in arrivo da Firebase partiva comunque, anche se
+  // l'ascoltatore aveva messo in pausa. Le pause "fantasma" del player (browser in
+  // background ecc.) NON lo impostano, quindi in quei casi il brano successivo riparte.
+  const userPausedRef = useRef(false);
   // I browser (Safari in particolare) bloccano l'autoplay di un <audio> finché non è
   // stato "sbloccato" da un'interazione utente diretta su QUELL'elemento. Il tag della
   // musica si sblocca quando l'utente preme Play, ma quello degli spot resta bloccato
@@ -347,23 +366,48 @@ export default function RadioPucciotto() {
   // ascoltatori che si collegano lo trovano ancora lì e lo sentono partire "da solo".
   // onDisconnect fa pulire il nodo lato server non appena Firebase rileva che questo
   // client si è disconnesso, quale che sia il motivo (crash, chiusura tab, rete).
-  useEffect(() => {
-    if (!isGestionale) return;
-    const cleanup = onDisconnect(ref(db, "adPlaying"));
-    cleanup.set(null);
-    return () => { cleanup.cancel(); };
-  }, [isGestionale]);
-
-  // Stessa protezione, ma per "nowPlaying": se il gestionale si disconnette (chiude
+  //
+  // Le pulizie vengono registrate SOLO dopo che QUESTA scheda ha davvero trasmesso
+  // (primo Play): prima venivano registrate appena si apriva il gestionale, quindi
+  // aprire una seconda scheda del gestionale (o dal telefono) e poi chiuderla spegneva
+  // la diretta che stava andando dall'altra scheda.
+  const [hasBroadcast, setHasBroadcast] = useState(false);
+  useEffect(() => { if (isGestionale && isPlaying) setHasBroadcast(true); }, [isGestionale, isPlaying]);
+  //
+  // Stessa protezione anche per "nowPlaying": se il gestionale si disconnette (chiude
   // la tab, crash, perde la rete) senza aver messo in pausa, il nodo "nowPlaying"
   // altrimenti resterebbe scritto per sempre con l'ultimo brano trasmesso, e la
   // vista pubblica continuerebbe a risultare "LIVE" anche se non trasmette più nessuno.
+  //
+  // Firebase esegue queste pulizie UNA volta sola: dopo un buco di rete del gestionale
+  // non erano più attive. Ora le registriamo di nuovo ad ogni (ri)connessione, e alla
+  // riconnessione ripubblichiamo subito il brano in onda col punto reale, così gli
+  // ascoltatori ritrovano la diretta senza aspettare il battito dei 15 secondi.
   useEffect(() => {
-    if (!isGestionale) return;
-    const cleanup = onDisconnect(ref(db, "nowPlaying"));
-    cleanup.set(null);
-    return () => { cleanup.cancel(); };
-  }, [isGestionale]);
+    if (!isGestionale || !hasBroadcast) return;
+    const npRef = ref(db, "nowPlaying");
+    const adRef = ref(db, "adPlaying");
+    let wasConnected = false;
+    const unsub = onValue(ref(db, ".info/connected"), (snapshot) => {
+      if (snapshot.val() !== true) return;
+      onDisconnect(npRef).set(null);
+      onDisconnect(adRef).set(null);
+      const isReconnect = wasConnected;
+      wasConnected = true;
+      if (!isReconnect || !isPlayingRef.current) return;
+      const c = currentRef.current;
+      if (!c) return;
+      const t = c.isCustom
+        ? (audioRef.current?.currentTime || 0)
+        : (ytPlayerRef.current?.getCurrentTime?.() || 0);
+      publishNowPlaying(c, t);
+    });
+    return () => {
+      unsub();
+      onDisconnect(npRef).cancel();
+      onDisconnect(adRef).cancel();
+    };
+  }, [isGestionale, hasBroadcast]);
 
   // Carica canzoni da public/my-song/index.json
   useEffect(() => {
@@ -783,9 +827,19 @@ export default function RadioPucciotto() {
     // frequente basato sull'orologio reale (Date.now) recupera subito il ritardo non
     // appena il browser lo lascia girare di nuovo, invece di perdere lo scatto.
     lastScheduledAdAtRef.current = Date.now();
+    let lastTick = Date.now();
     const id = setInterval(() => {
-      if (!isPlayingRef.current || !adEvery2MinEnabled) return;
-      const elapsedMs = Date.now() - lastScheduledAdAtRef.current;
+      const now = Date.now();
+      if (!isPlayingRef.current || !adEvery2MinEnabled) {
+        // Il tempo passato in PAUSA non conta: spostiamo avanti il punto di partenza.
+        // Prima contava anche quello, quindi con la pagina aperta da più di N minuti
+        // (o dopo una pausa lunga) lo spot partiva pochi secondi dopo aver premuto Play.
+        lastScheduledAdAtRef.current += now - lastTick;
+        lastTick = now;
+        return;
+      }
+      lastTick = now;
+      const elapsedMs = now - lastScheduledAdAtRef.current;
       if (elapsedMs >= Math.max(1, adIntervalMinutes) * 60000) {
         lastScheduledAdAtRef.current = Date.now();
         playSpotInBackgroundRef.current();
@@ -992,7 +1046,7 @@ export default function RadioPucciotto() {
 
   useEffect(() => {
     if (!("mediaSession" in navigator)) return;
-    navigator.mediaSession.setActionHandler("play", () => { unlockAdAudio(); setIsPlaying(true); });
+    navigator.mediaSession.setActionHandler("play", () => { unlockAdAudio(); userPausedRef.current = false; setIsPlaying(true); });
     // Gestionale: il comando "pausa" del SISTEMA (tasti multimediali, cuffie bluetooth
     // tolte/scollegate, una chiamata Teams/Zoom/WhatsApp che si prende l'audio, un'altra
     // app che parte) va IGNORATO. Prima metteva in pausa la trasmissione intera — e con
@@ -1000,7 +1054,7 @@ export default function RadioPucciotto() {
     // pagina: era una delle cause della "pausa da sola" a scheda in background. Il
     // gestionale si mette in pausa solo dal suo pulsante. L'handler vuoto (non null)
     // serve a impedire anche l'azione predefinita del browser (fermare i media).
-    navigator.mediaSession.setActionHandler("pause", isGestionale ? () => {} : () => setIsPlaying(false));
+    navigator.mediaSession.setActionHandler("pause", isGestionale ? () => {} : () => { userPausedRef.current = true; setIsPlaying(false); });
     return () => {
       navigator.mediaSession.setActionHandler("play", null);
       navigator.mediaSession.setActionHandler("pause", null);
@@ -1422,7 +1476,12 @@ export default function RadioPucciotto() {
       // Il gestionale è connesso ma non sta trasmettendo (pausa, nessun brano
       // selezionato): senza questo, "nowPlaying" restava fermo all'ultimo brano
       // pubblicato e la vista pubblica risultava "LIVE" anche a trasmissione ferma.
-      set(ref(db, "nowPlaying"), null).catch((e) => console.warn("Firebase write error:", e));
+      // Solo se QUESTA scheda ha già trasmesso qualcosa: appena aperto (o ricaricato),
+      // il gestionale non è ancora in play, e prima questa scrittura spegneva la diretta
+      // per tutti — anche quella che stava andando da un'altra scheda del gestionale.
+      if (lastPublishedTrackIdRef.current !== null) {
+        set(ref(db, "nowPlaying"), null).catch((e) => console.warn("Firebase write error:", e));
+      }
       return;
     }
     const isNewTrack = lastPublishedTrackIdRef.current !== current.id;
@@ -1476,13 +1535,28 @@ export default function RadioPucciotto() {
   // sentiva alcun cambiamento nel bilanciamento spot/musica. Ora l'errore viene mostrato
   // anche nello stato a video, così il problema è visibile subito invece di restare
   // silenzioso.
-  useEffect(() => {
-    if (!isGestionale) return;
-    set(ref(db, "settings/adVolume"), adVolume).catch((e) => {
+  // Il valore si salva SOLO quando il gestore sposta lo slider (vedi onChange più sotto).
+  // Prima veniva scritto anche all'apertura del gestionale, col valore di default (70%):
+  // ogni volta che si apriva/ricaricava il gestionale, il volume spot scelto veniva perso
+  // per tutti gli ascoltatori. Ora all'apertura il gestionale LEGGE il valore salvato.
+  const adVolumeTouchedRef = useRef(false);
+  const saveAdVolume = (v) => {
+    adVolumeTouchedRef.current = true;
+    set(ref(db, "settings/adVolume"), v).catch((e) => {
       console.warn("Firebase write error:", e);
       setStatus("Errore salvataggio volume spot — controlla le regole del Realtime Database (" + e.message + ")");
     });
-  }, [adVolume, isGestionale]);
+  };
+  useEffect(() => {
+    if (!isGestionale) return;
+    get(ref(db, "settings/adVolume"))
+      .then((snapshot) => {
+        const v = snapshot.val();
+        // Se nel frattempo il gestore ha già spostato lo slider, vale la sua scelta.
+        if (typeof v === "number" && !adVolumeTouchedRef.current) setAdVolume(v);
+      })
+      .catch((e) => console.warn("Lettura volume spot non riuscita:", e));
+  }, [isGestionale]);
 
   // Vista pubblica: riceve il volume spot impostato dal gestionale e lo applica,
   // al posto del valore di default locale.
@@ -1648,6 +1722,33 @@ export default function RadioPucciotto() {
   // qualsiasi si ferma, resta fermo (dura pochi secondi): meglio uno spot che finisce un
   // attimo prima che uno che si riavvia in loop.
 
+  // Vista radio pubblica: diretta ferma (il gestionale ha messo in pausa o si è
+  // disconnesso). Prima l'ascoltatore continuava a sentire il brano fino alla fine mentre
+  // la pagina diceva "OFFLINE", e col pulsante disattivato non poteva nemmeno fermarlo.
+  // Ora, se la diretta resta ferma per 20 secondi, fermiamo anche il player locale. I 20
+  // secondi di tolleranza servono per i piccoli buchi di rete del gestionale: in quel
+  // caso la diretta torna da sola (vedi ripubblicazione alla riconnessione) e
+  // l'ascoltatore non si accorge di nulla. Quando la diretta riparte, il brano riparte da
+  // solo, a meno che l'ascoltatore non avesse messo in pausa lui.
+  useEffect(() => {
+    if (isGestionale || radioTrack) return;
+    if (lastPublicTrackKeyRef.current === null) return; // non stava suonando nulla
+    // L'ascoltatore mette in pausa durante i 20 secondi: fermiamo subito.
+    if (!isPlaying) {
+      ytPlayerRef.current?.pauseVideo?.();
+      if (audioRef.current) safePauseAudio(audioRef.current);
+    }
+    const id = setTimeout(() => {
+      lastPublicTrackKeyRef.current = null; // alla ripartenza verrà trattato come brano nuovo
+      lastPublicStartedAtRef.current = null;
+      keepAliveLoopRef.current = false;
+      ytPlayerRef.current?.pauseVideo?.();
+      if (audioRef.current) safePauseAudio(audioRef.current);
+      setIsPlaying(false);
+    }, 20000);
+    return () => clearTimeout(id);
+  }, [radioTrack, isPlaying, isGestionale]);
+
   // Vista radio pubblica: quando arriva/cambia radioTrack, carica il brano giusto
   // (YouTube o file custom) e si posiziona nel punto esatto di trasmissione, sincronizzato.
   // Gestisce ANCHE il play/pausa locale (isPlaying), tutto in un unico effetto, così non
@@ -1680,6 +1781,8 @@ export default function RadioPucciotto() {
           if (elapsed >= 0 && elapsed < (audioRef.current.duration || Infinity)) {
             audioRef.current.currentTime = elapsed;
           }
+          // L'ascoltatore aveva messo in pausa lui: il brano nuovo resta pronto ma fermo.
+          if (userPausedRef.current) return;
           // Al primo arrivo del brano tentiamo sempre l'autoplay (comportamento da "radio
           // live"); se il browser lo blocca perché manca un'interazione utente, isPlaying
           // resta false e l'utente vedrà il tasto Play pronto per partire manualmente.
@@ -1720,6 +1823,13 @@ export default function RadioPucciotto() {
       if (isNewTrack) {
         lastPublicTrackKeyRef.current = trackKey;
         keepAliveLoopRef.current = false; // arriva il brano vero: non è più il loop di attesa
+        if (userPausedRef.current) {
+          // L'ascoltatore aveva messo in pausa lui: prepariamo il brano nuovo SENZA farlo
+          // partire (prima loadVideoById lo avviava sempre). Al suo Play, il ramo
+          // "isPlaying" qui sotto lo riporta al punto giusto della diretta.
+          ytPlayerRef.current.cueVideoById({ videoId: radioTrack.videoId, startSeconds: elapsed });
+          return;
+        }
         armSuppressPause();
         ytPlayerRef.current.loadVideoById({ videoId: radioTrack.videoId, startSeconds: elapsed });
         ytPlayerRef.current.unMute?.();
@@ -1839,11 +1949,15 @@ export default function RadioPucciotto() {
           <button
             onClick={() => {
               unlockAdAudio();
-              setIsPlaying((p) => !p);
+              // Ricorda se è stato l'ascoltatore a mettere in pausa (vedi userPausedRef).
+              userPausedRef.current = isPlaying;
+              setIsPlaying(!isPlaying);
             }}
-            disabled={!isLive}
+            // Attivo anche a diretta ferma finché la musica sta ancora suonando (i 20 secondi
+            // di tolleranza): prima era disattivato e l'ascoltatore non poteva fermarla.
+            disabled={!isLive && !isPlaying}
             aria-label={isPlaying ? "Pausa" : "Play"}
-            style={{ width: 64, height: 64, borderRadius: "50%", background: isLive ? RED : "#444", border: "none", cursor: isLive ? "pointer" : "not-allowed", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: isLive ? `0 0 20px ${RED}55` : "none" }}>
+            style={{ width: 64, height: 64, borderRadius: "50%", background: isLive || isPlaying ? RED : "#444", border: "none", cursor: isLive || isPlaying ? "pointer" : "not-allowed", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: isLive || isPlaying ? `0 0 20px ${RED}55` : "none" }}>
             {isPlaying ? <Pause size={28} color={WHITE} fill={WHITE} /> : <Play size={28} color={WHITE} fill={WHITE} />}
           </button>
         </div>
@@ -2071,7 +2185,7 @@ export default function RadioPucciotto() {
           <div className="vol-control" style={{ display: "flex", alignItems: "center", gap: "10px", paddingTop: "4px", borderTop: "1px dashed rgba(26,26,26,0.1)" }}>
             <Volume2 size={16} color={RED} />
             <span style={{ fontSize: "12px", color: "#888", flexShrink: 0 }}>Volume spot</span>
-            <input type="range" min="0" max="1" step="0.05" value={adVolume} onChange={(e) => setAdVolume(parseFloat(e.target.value))} style={{ flex: 1, accentColor: RED }} />
+            <input type="range" min="0" max="1" step="0.05" value={adVolume} onChange={(e) => { const v = parseFloat(e.target.value); setAdVolume(v); saveAdVolume(v); }} style={{ flex: 1, accentColor: RED }} />
             <span style={{ fontSize: "11px", color: "#888", width: "34px", textAlign: "right", flexShrink: 0 }}>{Math.round(adVolume * 100)}%</span>
           </div>
 
