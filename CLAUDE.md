@@ -61,6 +61,12 @@ proprietario **in italiano**, in modo semplice e senza gergo tecnico.
 - **PR #5**: spot a rotazione fissa 1 → 2 → 3 → 1 … (prima erano scelti a caso,
   evitando solo di ripetere l'ultimo); la rotazione riprende da dove era rimasta
   anche dopo un ricaricamento.
+- **PR #6**: la radio pubblica da smartphone sta tutta in una schermata, senza
+  scorrere (verificato da 320×480 a 412×780, più finestre PC basse). Classi
+  `.pub-*` nello `<style>` della vista pubblica: misure da PC invariate, e sotto
+  `@media (max-width: 600px), (max-height: 700px)` misure proporzionate
+  all'altezza visibile (`dvh`, con `vh` di riserva) e titoli al massimo su 2 righe.
+  Il gestionale da telefono invece scorre, per via della playlist lunga.
 - **Per tornare indietro:** fare il revert del commit di merge della PR su `main`
   (Cloudflare ripubblica da solo).
 - La chiave della cache della playlist nel browser (`CACHE_KEY`, ora
