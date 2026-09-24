@@ -404,7 +404,7 @@ export default function RadioPucciotto() {
 
     // Chiave nuova: la cache vecchia conteneva la playlist globale per generi (con i
     // brani indiani/russi ecc.) e non deve essere riusata.
-    const CACHE_KEY = "rp_yt_cache_eu_am_v2"; // v2: esclusi i video non incorporabili
+    const CACHE_KEY = "rp_yt_cache_eu_am_v3"; // v3: esclusi i video non incorporabili, niente Germania
     // Alzata da 4 a 18 ore: con la chiave condivisa tra tutti i visitatori, ogni
     // scadenza cache moltiplicata per tanti browser è proprio ciò che genera le
     // raffiche che fanno scattare rateLimitExceeded (vedi anche il fix sotto sullo
@@ -441,12 +441,12 @@ export default function RadioPucciotto() {
     // ogni paese prendiamo sia i più ascoltati
     // DEL MOMENTO (classifica musicale YouTube del paese) sia quelli DI SEMPRE
     // (ricerca ordinata per visualizzazioni totali, ristretta a paese e lingua).
+    // Germania tolta di proposito: niente canzoni tedesche.
     const SOURCES = [
       { label: "Italia",          region: "IT", lang: "it", query: "canzoni italiane" },
       { label: "Internazionali",  region: "GB", lang: "en", query: "pop hits" },
       { label: "Spagna",          region: "ES", lang: "es", query: "canciones españolas" },
       { label: "Francia",         region: "FR", lang: "fr", query: "chanson française" },
-      { label: "Germania",        region: "DE", lang: "de", query: "deutsche musik" },
       { label: "Americane",       region: "US", lang: "en", query: "american pop hits" },
       { label: "Latine",          region: "MX", lang: "es", query: "musica latina reggaeton" },
     ];
@@ -927,7 +927,7 @@ export default function RadioPucciotto() {
   useEffect(() => {
     if (!isGestionale) return;
     let stalledChecks = 0;
-    const id = setInterval(() => {
+    const check = () => {
       const c = currentRef.current;
       if (!isPlayingRef.current || !c) { stalledChecks = 0; return; }
       let stalled = false;
@@ -949,8 +949,26 @@ export default function RadioPucciotto() {
         armSuppressPause();
         ytPlayerRef.current?.playVideo?.();
       }
-    }, 5000);
-    return () => clearInterval(id);
+    };
+    // Il "battito" dei 5 secondi arriva da un piccolo Web Worker e non da un setInterval
+    // della pagina: Chrome, dopo qualche minuto di scheda nascosta e SILENZIOSA (proprio
+    // il caso di un player fermo), rallenta i timer della pagina fino a una volta al
+    // minuto, quelli dei worker no. Se il worker non si può creare, si ripiega sul timer.
+    let worker = null;
+    let workerUrl = null;
+    let intervalId = null;
+    try {
+      workerUrl = URL.createObjectURL(new Blob(["setInterval(() => postMessage(0), 5000);"], { type: "text/javascript" }));
+      worker = new Worker(workerUrl);
+      worker.onmessage = check;
+    } catch (_) {
+      intervalId = setInterval(check, 5000);
+    }
+    return () => {
+      if (worker) worker.terminate();
+      if (workerUrl) URL.revokeObjectURL(workerUrl);
+      if (intervalId) clearInterval(intervalId);
+    };
   }, [isGestionale]);
 
   // Media Session: espone titolo/artista e i controlli play-pausa al sistema operativo
