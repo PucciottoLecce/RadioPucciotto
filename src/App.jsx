@@ -46,6 +46,24 @@ const AD_LINES = [
   "Il segreto di un buon momento? Pucciotto.",
 ];
 
+// Timer "che non si addormenta": chiama fn ogni `ms` millisecondi usando un piccolo Web
+// Worker invece di un setInterval della pagina. Chrome, dopo qualche minuto di scheda
+// nascosta e SILENZIOSA (gestionale col "Muto generale" o volume a zero, oppure player
+// fermo), rallenta i timer della pagina fino a una volta al minuto; quelli dei worker no.
+// Se il worker non si può creare si ripiega sul normale setInterval. Ritorna la funzione
+// per fermarlo.
+function startTicker(fn, ms) {
+  try {
+    const url = URL.createObjectURL(new Blob([`setInterval(() => postMessage(0), ${ms});`], { type: "text/javascript" }));
+    const worker = new Worker(url);
+    worker.onmessage = () => fn();
+    return () => { worker.terminate(); URL.revokeObjectURL(url); };
+  } catch (_) {
+    const id = setInterval(fn, ms);
+    return () => clearInterval(id);
+  }
+}
+
 function shuffleArray(arr) {
   const a = [...arr];
   for (let i = a.length - 1; i > 0; i--) {
@@ -863,7 +881,7 @@ export default function RadioPucciotto() {
     // appena il browser lo lascia girare di nuovo, invece di perdere lo scatto.
     lastScheduledAdAtRef.current = Date.now();
     let lastTick = Date.now();
-    const id = setInterval(() => {
+    return startTicker(() => {
       const now = Date.now();
       if (!isPlayingRef.current || !adEvery2MinEnabled) {
         // Il tempo passato in PAUSA non conta: spostiamo avanti il punto di partenza.
@@ -875,12 +893,15 @@ export default function RadioPucciotto() {
       }
       lastTick = now;
       const elapsedMs = now - lastScheduledAdAtRef.current;
+      // NON azzeriamo qui l'orologio: lo fa playSpotInBackground solo se lo spot parte
+      // davvero. Prima veniva azzerato anche quando lo spot veniva scartato (spot
+      // precedente ancora in corso o finito da meno di 30 secondi), e così saltava un
+      // giro intero: lo spot successivo arrivava dopo il doppio del tempo impostato.
+      // Ora, se viene scartato, si riprova al controllo successivo (10 secondi dopo).
       if (elapsedMs >= Math.max(1, adIntervalMinutes) * 60000) {
-        lastScheduledAdAtRef.current = Date.now();
         playSpotInBackgroundRef.current();
       }
     }, 10000);
-    return () => clearInterval(id);
   }, [adEvery2MinEnabled, adIntervalMinutes, isGestionale]);
 
   // Applica il mute generale agli elementi audio reali: musica (HTML5 o YouTube) e spot.
@@ -1039,25 +1060,9 @@ export default function RadioPucciotto() {
         ytPlayerRef.current?.playVideo?.();
       }
     };
-    // Il "battito" dei 5 secondi arriva da un piccolo Web Worker e non da un setInterval
-    // della pagina: Chrome, dopo qualche minuto di scheda nascosta e SILENZIOSA (proprio
-    // il caso di un player fermo), rallenta i timer della pagina fino a una volta al
-    // minuto, quelli dei worker no. Se il worker non si può creare, si ripiega sul timer.
-    let worker = null;
-    let workerUrl = null;
-    let intervalId = null;
-    try {
-      workerUrl = URL.createObjectURL(new Blob(["setInterval(() => postMessage(0), 5000);"], { type: "text/javascript" }));
-      worker = new Worker(workerUrl);
-      worker.onmessage = check;
-    } catch (_) {
-      intervalId = setInterval(check, 5000);
-    }
-    return () => {
-      if (worker) worker.terminate();
-      if (workerUrl) URL.revokeObjectURL(workerUrl);
-      if (intervalId) clearInterval(intervalId);
-    };
+    // Il "battito" dei 5 secondi arriva da startTicker (Web Worker): un player fermo
+    // rende la scheda silenziosa, ed è proprio il caso in cui Chrome rallenta i timer.
+    return startTicker(check, 5000);
   }, [isGestionale]);
 
   // Media Session: espone titolo/artista e i controlli play-pausa al sistema operativo
@@ -1533,7 +1538,9 @@ export default function RadioPucciotto() {
   // quindi niente micro-salti continui: solo correzioni vere quando serve.
   useEffect(() => {
     if (!isGestionale) return;
-    const id = setInterval(() => {
+    // startTicker: il battito deve continuare regolare anche col gestionale in background
+    // e silenzioso (muto generale), quando Chrome rallenta i timer della pagina.
+    return startTicker(() => {
       if (!isPlayingRef.current) return;
       const c = currentRef.current;
       if (!c) return;
@@ -1544,7 +1551,6 @@ export default function RadioPucciotto() {
       // riportata dal player è instabile e pubblicherebbe valori sballati.
       if (t > 3) publishNowPlaying(c, t);
     }, 15000);
-    return () => clearInterval(id);
   }, [isGestionale]);
 
   // Vista radio pubblica: ascolta Firebase in tempo reale, è l'UNICA fonte del brano in onda.
