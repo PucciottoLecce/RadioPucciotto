@@ -1927,21 +1927,53 @@ export default function RadioPucciotto() {
 
   // ─── VISTA RADIO PUBBLICA ────────────────────────────────────────────────
   if (!isGestionale) return (
-    <div style={{ minHeight: "100vh", background: BLACK, fontFamily: "'DM Sans', sans-serif", color: WHITE, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "space-between" }}>
+    <div className="pub-root" style={{ background: BLACK, fontFamily: "'DM Sans', sans-serif", color: WHITE, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "space-between" }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Lobster&family=DM+Sans:wght@400;600;700&display=swap');
         * { box-sizing: border-box; }
         @keyframes pulse { 0%,100% { opacity: 0.4; transform: scaleY(0.4); } 50% { opacity: 1; transform: scaleY(1); } }
         @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+        /* Misure "da PC" (invariate rispetto a prima). */
+        .pub-root { min-height: 100vh; min-height: 100dvh; }
+        .pub-header { padding: 20px 28px; }
+        .pub-logo { width: 44px; height: 44px; }
+        .pub-brand { font-size: 26px; }
+        .pub-main { gap: 36px; padding: 40px 28px; }
+        .pub-disc { width: 180px; height: 180px; }
+        .pub-disc-center { width: 60px; height: 60px; }
+        .pub-cat { margin-bottom: 10px; }
+        .pub-song { font-size: 22px; }
+        .pub-play { width: 64px; height: 64px; }
+        .pub-sponsor { padding: 10px 28px; }
+        .pub-sponsor-text { font-size: 13px; }
+        .pub-footer { padding: 12px 28px; }
+        /* Smartphone (e finestre basse): tutta la radio deve stare in UNA schermata,
+           senza scorrere. Le misure si adattano all'altezza realmente visibile (dvh =
+           schermo meno le barre del browser; vh è la riserva per i browser vecchi),
+           con un minimo e un massimo; i titoli lunghi vanno al massimo su 2 righe. */
+        @media (max-width: 600px), (max-height: 700px) {
+          .pub-header { padding: 12px 16px; }
+          .pub-logo { width: 36px; height: 36px; }
+          .pub-brand { font-size: 22px; }
+          .pub-main { gap: clamp(8px, 2.6vh, 36px); gap: clamp(8px, 2.6dvh, 36px); padding: clamp(8px, 2.5vh, 40px) 16px; padding: clamp(8px, 2.5dvh, 40px) 16px; }
+          .pub-disc { width: clamp(72px, 20vh, 180px); height: clamp(72px, 20vh, 180px); width: clamp(72px, 20dvh, 180px); height: clamp(72px, 20dvh, 180px); }
+          .pub-disc-center { width: 34%; height: 34%; }
+          .pub-cat { margin-bottom: 6px; }
+          .pub-song { font-size: 18px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+          .pub-play { width: clamp(52px, 8.5vh, 64px); height: clamp(52px, 8.5vh, 64px); width: clamp(52px, 8.5dvh, 64px); height: clamp(52px, 8.5dvh, 64px); }
+          .pub-sponsor { padding: 8px 16px; }
+          .pub-sponsor-text { font-size: 12px; }
+          .pub-footer { padding: 8px 16px; }
+        }
       `}</style>
 
       {/* Header */}
-      <header style={{ width: "100%", padding: "20px 28px", display: "flex", alignItems: "center", justifyContent: "space-between", borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
+      <header className="pub-header" style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
         <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-          <div style={{ width: 44, height: 44, borderRadius: "50%", background: WHITE, border: `2px solid ${WHITE}`, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
+          <div className="pub-logo" style={{ borderRadius: "50%", background: WHITE, border: `2px solid ${WHITE}`, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
             <img src="/logo.png" alt="Pucciotto" style={{ width: "100%", height: "100%", objectFit: "contain" }} />
           </div>
-          <div style={{ fontFamily: "'Lobster', cursive", fontSize: "26px", color: RED }}>Radio Pucciotto</div>
+          <div className="pub-brand" style={{ fontFamily: "'Lobster', cursive", color: RED }}>Radio Pucciotto</div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
           <div style={{ width: 8, height: 8, borderRadius: "50%", background: isLive ? "#27ae60" : "#888", boxShadow: isLive ? "0 0 6px #27ae60" : "none" }} />
@@ -1950,12 +1982,12 @@ export default function RadioPucciotto() {
       </header>
 
       {/* Corpo centrale */}
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "36px", padding: "40px 28px", width: "100%", maxWidth: "480px" }}>
+      <div className="pub-main" style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", width: "100%", maxWidth: "480px" }}>
 
         {/* Player YT + equalizzatore */}
-        <div style={{ position: "relative", width: 180, height: 180 }}>
-          <div style={{ width: 180, height: 180, borderRadius: "50%", background: `radial-gradient(circle, ${publicTrack?.color || RED}33, ${BLACK})`, border: `3px solid ${publicTrack?.color || RED}55`, display: "flex", alignItems: "center", justifyContent: "center", animation: isPlaying && isLive ? "spin 12s linear infinite" : "none" }}>
-            <div style={{ width: 60, height: 60, borderRadius: "50%", background: BLACK, display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <div className="pub-disc" style={{ position: "relative", flexShrink: 0 }}>
+          <div className="pub-disc" style={{ borderRadius: "50%", background: `radial-gradient(circle, ${publicTrack?.color || RED}33, ${BLACK})`, border: `3px solid ${publicTrack?.color || RED}55`, display: "flex", alignItems: "center", justifyContent: "center", animation: isPlaying && isLive ? "spin 12s linear infinite" : "none" }}>
+            <div className="pub-disc-center" style={{ borderRadius: "50%", background: BLACK, display: "flex", alignItems: "center", justifyContent: "center" }}>
               <div id="yt-player" style={{ width: 1, height: 1, overflow: "hidden", opacity: 0, position: "absolute" }} />
               {/* equalizzatore visivo */}
               <div style={{ display: "flex", gap: "4px", alignItems: "center", height: "24px" }}>
@@ -1971,14 +2003,14 @@ export default function RadioPucciotto() {
         <div style={{ textAlign: "center" }}>
           {isLive ? (
             <>
-              <div style={{ fontSize: "11px", color: publicTrack?.color || RED, letterSpacing: "2px", fontWeight: 700, marginBottom: "10px", textTransform: "uppercase" }}>{publicTrack?.category || "—"}</div>
-              <div style={{ fontSize: "22px", fontWeight: 700, lineHeight: 1.2, marginBottom: "8px" }}>{publicTrack?.title}</div>
+              <div className="pub-cat" style={{ fontSize: "11px", color: publicTrack?.color || RED, letterSpacing: "2px", fontWeight: 700, textTransform: "uppercase" }}>{publicTrack?.category || "—"}</div>
+              <div className="pub-song" style={{ fontWeight: 700, lineHeight: 1.2, marginBottom: "8px" }}>{publicTrack?.title}</div>
               <div style={{ fontSize: "15px", color: "#aaa" }}>{publicTrack?.artist || ""}</div>
             </>
           ) : (
             <>
-              <div style={{ fontSize: "11px", color: "#888", letterSpacing: "2px", fontWeight: 700, marginBottom: "10px", textTransform: "uppercase" }}>Radio Pucciotto</div>
-              <div style={{ fontSize: "22px", fontWeight: 700, lineHeight: 1.2, marginBottom: "8px" }}>In attesa della diretta...</div>
+              <div className="pub-cat" style={{ fontSize: "11px", color: "#888", letterSpacing: "2px", fontWeight: 700, textTransform: "uppercase" }}>Radio Pucciotto</div>
+              <div className="pub-song" style={{ fontWeight: 700, lineHeight: 1.2, marginBottom: "8px" }}>In attesa della diretta...</div>
               <div style={{ fontSize: "15px", color: "#aaa" }}>La trasmissione partirà a breve</div>
             </>
           )}
@@ -2008,7 +2040,8 @@ export default function RadioPucciotto() {
             // di tolleranza): prima era disattivato e l'ascoltatore non poteva fermarla.
             disabled={!isLive && !isPlaying}
             aria-label={isPlaying ? "Pausa" : "Play"}
-            style={{ width: 64, height: 64, borderRadius: "50%", background: isLive || isPlaying ? RED : "#444", border: "none", cursor: isLive || isPlaying ? "pointer" : "not-allowed", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: isLive || isPlaying ? `0 0 20px ${RED}55` : "none" }}>
+            className="pub-play"
+            style={{ borderRadius: "50%", background: isLive || isPlaying ? RED : "#444", border: "none", cursor: isLive || isPlaying ? "pointer" : "not-allowed", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: isLive || isPlaying ? `0 0 20px ${RED}55` : "none" }}>
             {isPlaying ? <Pause size={28} color={WHITE} fill={WHITE} /> : <Play size={28} color={WHITE} fill={WHITE} />}
           </button>
         </div>
@@ -2023,13 +2056,13 @@ export default function RadioPucciotto() {
       </div>
 
       {/* Banner sponsor */}
-      <div style={{ width: "100%", background: "rgba(192,57,43,0.15)", borderTop: "1px solid rgba(192,57,43,0.2)", padding: "10px 28px", display: "flex", alignItems: "center", gap: "10px" }}>
+      <div className="pub-sponsor" style={{ width: "100%", background: "rgba(192,57,43,0.15)", borderTop: "1px solid rgba(192,57,43,0.2)", display: "flex", alignItems: "center", gap: "10px" }}>
         <span style={{ background: RED, color: WHITE, padding: "2px 8px", borderRadius: "5px", fontSize: "10px", fontWeight: 700, letterSpacing: "1px", flexShrink: 0 }}>SPONSOR</span>
-        <span key={adLine} style={{ fontSize: "13px", color: "#aaa" }}>{AD_LINES[adLine]}</span>
+        <span key={adLine} className="pub-sponsor-text" style={{ color: "#aaa" }}>{AD_LINES[adLine]}</span>
       </div>
 
       {/* Footer */}
-      <footer style={{ width: "100%", padding: "12px 28px", textAlign: "center", fontSize: "10px", color: "#444" }}>
+      <footer className="pub-footer" style={{ width: "100%", textAlign: "center", fontSize: "10px", color: "#444" }}>
         Radio Pucciotto — musica © dei rispettivi titolari, via YouTube
       </footer>
 
