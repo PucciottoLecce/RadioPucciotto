@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useMemo } from "react";
 import { Play, Pause, SkipForward, SkipBack, Volume2, VolumeX, Trash2, Shuffle, Music, Check } from "lucide-react";
 import { db } from "./firebase.js";
-import { ref, set, onValue, onDisconnect } from "firebase/database";
+import { ref, set, get, onValue, onDisconnect } from "firebase/database";
 
 const RED   = "#c0392b";
 const WHITE = "#ffffff";
@@ -87,10 +87,23 @@ export default function RadioPucciotto() {
   const [adVolume, setAdVolume] = useState(0.7);
   // Attiva/disattiva l'unico meccanismo di spot rimasto: quello periodico "ogni N minuti"
   // in sottofondo (sopra la musica). Lo spot legato al numero di canzoni è stato rimosso.
-  const [adEvery2MinEnabled, setAdEvery2MinEnabled] = useState(true);
+  // Questa impostazione e i minuti qui sotto vengono ricordati dal browser del gestionale
+  // (localStorage): prima tornavano a "attivo, ogni 2 minuti" ad ogni ricaricamento.
+  const [adEvery2MinEnabled, setAdEvery2MinEnabled] = useState(() => {
+    try { const v = localStorage.getItem("rp_ad_enabled"); return v === null ? true : v === "1"; } catch (_) { return true; }
+  });
   // Minuti configurabili tra uno spot "in sottofondo" e il successivo (prima era
   // fisso a 2 minuti, non modificabile dal gestionale).
-  const [adIntervalMinutes, setAdIntervalMinutes] = useState(2);
+  const [adIntervalMinutes, setAdIntervalMinutes] = useState(() => {
+    try { const v = parseInt(localStorage.getItem("rp_ad_minutes"), 10); return v >= 1 ? v : 2; } catch (_) { return 2; }
+  });
+  useEffect(() => {
+    if (!isGestionale) return;
+    try {
+      localStorage.setItem("rp_ad_enabled", adEvery2MinEnabled ? "1" : "0");
+      localStorage.setItem("rp_ad_minutes", String(adIntervalMinutes));
+    } catch (_) { /* memoria del browser non disponibile: pazienza, restano i valori in uso */ }
+  }, [adEvery2MinEnabled, adIntervalMinutes, isGestionale]);
   const [adLine, setAdLine] = useState(0);
   const [status, setStatus] = useState("Pronto");
   const [shuffleMode, setShuffleMode] = useState(false);
@@ -201,6 +214,12 @@ export default function RadioPucciotto() {
   // permette di distinguere quel caso e riposizionare l'audio, invece di ignorarlo
   // come un semplice cambio di isPlaying.
   const lastPublicStartedAtRef = useRef(null);
+  // Vista pubblica: true se l'ASCOLTATORE ha messo in pausa di sua scelta (pulsante o
+  // comando di pausa del sistema). Serve a non farlo ripartire da solo al brano
+  // successivo: prima ogni nuovo brano in arrivo da Firebase partiva comunque, anche se
+  // l'ascoltatore aveva messo in pausa. Le pause "fantasma" del player (browser in
+  // background ecc.) NON lo impostano, quindi in quei casi il brano successivo riparte.
+  const userPausedRef = useRef(false);
   // I browser (Safari in particolare) bloccano l'autoplay di un <audio> finché non è
   // stato "sbloccato" da un'interazione utente diretta su QUELL'elemento. Il tag della
   // musica si sblocca quando l'utente preme Play, ma quello degli spot resta bloccato
@@ -347,23 +366,48 @@ export default function RadioPucciotto() {
   // ascoltatori che si collegano lo trovano ancora lì e lo sentono partire "da solo".
   // onDisconnect fa pulire il nodo lato server non appena Firebase rileva che questo
   // client si è disconnesso, quale che sia il motivo (crash, chiusura tab, rete).
-  useEffect(() => {
-    if (!isGestionale) return;
-    const cleanup = onDisconnect(ref(db, "adPlaying"));
-    cleanup.set(null);
-    return () => { cleanup.cancel(); };
-  }, [isGestionale]);
-
-  // Stessa protezione, ma per "nowPlaying": se il gestionale si disconnette (chiude
+  //
+  // Le pulizie vengono registrate SOLO dopo che QUESTA scheda ha davvero trasmesso
+  // (primo Play): prima venivano registrate appena si apriva il gestionale, quindi
+  // aprire una seconda scheda del gestionale (o dal telefono) e poi chiuderla spegneva
+  // la diretta che stava andando dall'altra scheda.
+  const [hasBroadcast, setHasBroadcast] = useState(false);
+  useEffect(() => { if (isGestionale && isPlaying) setHasBroadcast(true); }, [isGestionale, isPlaying]);
+  //
+  // Stessa protezione anche per "nowPlaying": se il gestionale si disconnette (chiude
   // la tab, crash, perde la rete) senza aver messo in pausa, il nodo "nowPlaying"
   // altrimenti resterebbe scritto per sempre con l'ultimo brano trasmesso, e la
   // vista pubblica continuerebbe a risultare "LIVE" anche se non trasmette più nessuno.
+  //
+  // Firebase esegue queste pulizie UNA volta sola: dopo un buco di rete del gestionale
+  // non erano più attive. Ora le registriamo di nuovo ad ogni (ri)connessione, e alla
+  // riconnessione ripubblichiamo subito il brano in onda col punto reale, così gli
+  // ascoltatori ritrovano la diretta senza aspettare il battito dei 15 secondi.
   useEffect(() => {
-    if (!isGestionale) return;
-    const cleanup = onDisconnect(ref(db, "nowPlaying"));
-    cleanup.set(null);
-    return () => { cleanup.cancel(); };
-  }, [isGestionale]);
+    if (!isGestionale || !hasBroadcast) return;
+    const npRef = ref(db, "nowPlaying");
+    const adRef = ref(db, "adPlaying");
+    let wasConnected = false;
+    const unsub = onValue(ref(db, ".info/connected"), (snapshot) => {
+      if (snapshot.val() !== true) return;
+      onDisconnect(npRef).set(null);
+      onDisconnect(adRef).set(null);
+      const isReconnect = wasConnected;
+      wasConnected = true;
+      if (!isReconnect || !isPlayingRef.current) return;
+      const c = currentRef.current;
+      if (!c) return;
+      const t = c.isCustom
+        ? (audioRef.current?.currentTime || 0)
+        : (ytPlayerRef.current?.getCurrentTime?.() || 0);
+      publishNowPlaying(c, t);
+    });
+    return () => {
+      unsub();
+      onDisconnect(npRef).cancel();
+      onDisconnect(adRef).cancel();
+    };
+  }, [isGestionale, hasBroadcast]);
 
   // Carica canzoni da public/my-song/index.json
   useEffect(() => {
@@ -404,7 +448,7 @@ export default function RadioPucciotto() {
 
     // Chiave nuova: la cache vecchia conteneva la playlist globale per generi (con i
     // brani indiani/russi ecc.) e non deve essere riusata.
-    const CACHE_KEY = "rp_yt_cache_eu_am";
+    const CACHE_KEY = "rp_yt_cache_eu_am_v4"; // v4: solo brani riproducibili in Italia, niente Germania
     // Alzata da 4 a 18 ore: con la chiave condivisa tra tutti i visitatori, ogni
     // scadenza cache moltiplicata per tanti browser è proprio ciò che genera le
     // raffiche che fanno scattare rateLimitExceeded (vedi anche il fix sotto sullo
@@ -441,12 +485,12 @@ export default function RadioPucciotto() {
     // ogni paese prendiamo sia i più ascoltati
     // DEL MOMENTO (classifica musicale YouTube del paese) sia quelli DI SEMPRE
     // (ricerca ordinata per visualizzazioni totali, ristretta a paese e lingua).
+    // Germania tolta di proposito: niente canzoni tedesche.
     const SOURCES = [
       { label: "Italia",          region: "IT", lang: "it", query: "canzoni italiane" },
       { label: "Internazionali",  region: "GB", lang: "en", query: "pop hits" },
       { label: "Spagna",          region: "ES", lang: "es", query: "canciones españolas" },
       { label: "Francia",         region: "FR", lang: "fr", query: "chanson française" },
-      { label: "Germania",        region: "DE", lang: "de", query: "deutsche musik" },
       { label: "Americane",       region: "US", lang: "en", query: "american pop hits" },
       { label: "Latine",          region: "MX", lang: "es", query: "musica latina reggaeton" },
     ];
@@ -560,7 +604,7 @@ export default function RadioPucciotto() {
     // ristretta alla regione e alla lingua del paese.
     const searchSlice = ({ label, region, lang, query }, publishedAfter) => {
       const q = encodeURIComponent(`${query} official music video`);
-      let url = `https://www.googleapis.com/youtube/v3/search?part=snippet&q=${q}&type=video&videoCategoryId=10&order=viewCount&maxResults=${PER_SLICE}&regionCode=${region}&relevanceLanguage=${lang}&key=${YOUTUBE_API_KEY}`;
+      let url = `https://www.googleapis.com/youtube/v3/search?part=snippet&q=${q}&type=video&videoCategoryId=10&videoEmbeddable=true&order=viewCount&maxResults=${PER_SLICE}&regionCode=${region}&relevanceLanguage=${lang}&key=${YOUTUBE_API_KEY}`;
       if (publishedAfter) url += `&publishedAfter=${publishedAfter}`;
       return fetchJsonWithRetry(url, label)
         .then((data) => toTracks(data.items, label, (it) => it.id.videoId))
@@ -573,9 +617,12 @@ export default function RadioPucciotto() {
     // limitata ai brani dell'ultimo anno.
     const chartSlice = (source) => {
       const { label, region } = source;
-      const url = `https://www.googleapis.com/youtube/v3/videos?part=snippet&chart=mostPopular&videoCategoryId=10&regionCode=${region}&maxResults=${PER_SLICE}&key=${YOUTUBE_API_KEY}`;
+      const url = `https://www.googleapis.com/youtube/v3/videos?part=snippet,status&chart=mostPopular&videoCategoryId=10&regionCode=${region}&maxResults=${PER_SLICE}&key=${YOUTUBE_API_KEY}`;
       return fetchJsonWithRetry(url, label)
-        .then((data) => toTracks(data.items, label, (it) => it.id))
+        // Scarta i video che il proprietario non permette di riprodurre fuori da YouTube
+        // (frequenti tra i video ufficiali in classifica): nel player darebbero errore
+        // 101/150 e verrebbero saltati a raffica.
+        .then((data) => toTracks((data.items || []).filter((it) => it.status?.embeddable !== false), label, (it) => it.id))
         .catch((err) => { console.warn(err.message || err); return []; })
         .then((list) => (list.length ? list : searchSlice(source, trendingSince)));
     };
@@ -597,17 +644,52 @@ export default function RadioPucciotto() {
       return Promise.all(promises);
     };
 
+    // Controllo finale di riproducibilità, su TUTTI i brani (ricerca + classifica): il
+    // solo "incorporabile" non basta. Un video può esserlo ed essere comunque bloccato in
+    // Italia (capita coi brani delle classifiche USA/Messico), vietato ai minori (negli
+    // embed non parte) o non pubblico: nel player darebbe errore e verrebbe saltato.
+    // Una richiesta ogni 50 brani, 1 unità di quota l'una. Se il controllo fallisce
+    // teniamo i brani così come sono, invece di restare senza playlist.
+    const PLAY_REGION = "IT";
+    const isPlayableHere = (v) => {
+      if (v.status?.embeddable === false) return false;
+      if (v.status?.privacyStatus && v.status.privacyStatus !== "public") return false;
+      if (v.contentDetails?.contentRating?.ytRating === "ytAgeRestricted") return false;
+      const rr = v.contentDetails?.regionRestriction;
+      if (rr?.allowed && !rr.allowed.includes(PLAY_REGION)) return false;
+      if (rr?.blocked && rr.blocked.includes(PLAY_REGION)) return false;
+      return true;
+    };
+    const keepPlayable = (list) => {
+      const chunks = [];
+      for (let i = 0; i < list.length; i += 50) chunks.push(list.slice(i, i + 50));
+      return Promise.all(chunks.map((chunk) => {
+        const ids = chunk.map((t) => t.videoId).join(",");
+        const url = `https://www.googleapis.com/youtube/v3/videos?part=status,contentDetails&id=${ids}&maxResults=50&key=${YOUTUBE_API_KEY}`;
+        return fetchJsonWithRetry(url, "verifica")
+          .then((data) => {
+            const okIds = new Set((data.items || []).filter(isPlayableHere).map((v) => v.id));
+            // Un id che non torna proprio nella risposta è un video rimosso/privato.
+            return chunk.filter((t) => okIds.has(t.videoId));
+          })
+          .catch((err) => { console.warn(err.message || err); return chunk; });
+      })).then((parts) => parts.flat());
+    };
+
     runStaggered(SOURCES, fetchSlice, STAGGER_MS)
       .then((arrays) => {
         const mapped = arrays.flat();
         if (!mapped.length) throw new Error("Nessun brano trovato");
         // Rimuove duplicati per videoId (stesso video in più paesi o classifiche)
         const seen = new Set();
-        const deduped = mapped.filter((t) => {
+        return keepPlayable(mapped.filter((t) => {
           if (seen.has(t.videoId)) return false;
           seen.add(t.videoId);
           return true;
-        });
+        }));
+      })
+      .then((deduped) => {
+        if (!deduped.length) throw new Error("Nessun brano riproducibile trovato");
         const label = "🔥 Più ascoltati in Europa, America e America Latina: del momento e di sempre";
         // Salva in cache
         try {
@@ -715,9 +797,14 @@ export default function RadioPucciotto() {
             ytErrorCountRef.current = (now - ytLastErrorAtRef.current < 12000) ? ytErrorCountRef.current + 1 : 1;
             ytLastErrorAtRef.current = now;
             if (ytErrorCountRef.current > 5) {
-              // Troppi brani non incorporabili di fila: ci fermiamo invece di raffichare.
-              setStatus("Diversi brani non sono incorporabili da YouTube — in pausa. Prova a cambiare categoria o a ricaricare.");
-              setIsPlaying(false);
+              // Troppi brani non incorporabili di fila: invece di raffichare facciamo una
+              // pausa di 30 secondi e poi riproviamo col successivo. Prima qui la radio si
+              // FERMAVA del tutto (isPlaying=false) e restava ferma finché qualcuno non
+              // tornava sulla pagina a premere Play: un'altra "pausa da sola" a scheda in
+              // background. Se nel frattempo il gestore preme Pausa, non si riparte.
+              setStatus("Diversi brani di fila non sono incorporabili da YouTube — riprovo tra 30 secondi…");
+              ytErrorCountRef.current = 0;
+              setTimeout(() => { if (isPlayingRef.current) goNextRef.current(); }, 30000);
               return;
             }
             setStatus("Brano non disponibile, passo al prossimo…");
@@ -775,9 +862,19 @@ export default function RadioPucciotto() {
     // frequente basato sull'orologio reale (Date.now) recupera subito il ritardo non
     // appena il browser lo lascia girare di nuovo, invece di perdere lo scatto.
     lastScheduledAdAtRef.current = Date.now();
+    let lastTick = Date.now();
     const id = setInterval(() => {
-      if (!isPlayingRef.current || !adEvery2MinEnabled) return;
-      const elapsedMs = Date.now() - lastScheduledAdAtRef.current;
+      const now = Date.now();
+      if (!isPlayingRef.current || !adEvery2MinEnabled) {
+        // Il tempo passato in PAUSA non conta: spostiamo avanti il punto di partenza.
+        // Prima contava anche quello, quindi con la pagina aperta da più di N minuti
+        // (o dopo una pausa lunga) lo spot partiva pochi secondi dopo aver premuto Play.
+        lastScheduledAdAtRef.current += now - lastTick;
+        lastTick = now;
+        return;
+      }
+      lastTick = now;
+      const elapsedMs = now - lastScheduledAdAtRef.current;
       if (elapsedMs >= Math.max(1, adIntervalMinutes) * 60000) {
         lastScheduledAdAtRef.current = Date.now();
         playSpotInBackgroundRef.current();
@@ -909,6 +1006,60 @@ export default function RadioPucciotto() {
     return () => document.removeEventListener("visibilitychange", onVis);
   }, [isGestionale]);
 
+  // Gestionale: "cane da guardia" della riproduzione, attivo ANCHE a scheda in background.
+  // Il recupero qui sopra scatta solo quando si torna sulla scheda: se nel frattempo il
+  // browser (o l'iframe YouTube) aveva messo in pausa il player, la radio restava muta
+  // finché il gestore non tornava sulla pagina — la "pausa da sola" mentre si lavora su
+  // altro. Ogni 5 secondi controlliamo: se la trasmissione DOVREBBE suonare ma il player
+  // risulta fermo in pausa per due controlli di fila (almeno 5 secondi, quindi non un
+  // semplice buffering, che è uno stato diverso), lo facciamo ripartire.
+  useEffect(() => {
+    if (!isGestionale) return;
+    let stalledChecks = 0;
+    const check = () => {
+      const c = currentRef.current;
+      if (!isPlayingRef.current || !c) { stalledChecks = 0; return; }
+      let stalled = false;
+      if (c.isCustom) {
+        const a = audioRef.current;
+        // !ended: a fine mp3 ci pensa onEnded (goNext); ri-avviarlo lo farebbe ripartire da capo.
+        stalled = !!a && !!a.src && a.paused && !a.ended;
+      } else {
+        const state = ytPlayerRef.current?.getPlayerState?.();
+        const S = window.YT?.PlayerState;
+        stalled = !!S && (state === S.PAUSED || state === S.CUED);
+      }
+      stalledChecks = stalled ? stalledChecks + 1 : 0;
+      if (stalledChecks < 2) return;
+      stalledChecks = 0;
+      if (c.isCustom) {
+        safePlayAudio(audioRef.current).catch(() => {});
+      } else {
+        armSuppressPause();
+        ytPlayerRef.current?.playVideo?.();
+      }
+    };
+    // Il "battito" dei 5 secondi arriva da un piccolo Web Worker e non da un setInterval
+    // della pagina: Chrome, dopo qualche minuto di scheda nascosta e SILENZIOSA (proprio
+    // il caso di un player fermo), rallenta i timer della pagina fino a una volta al
+    // minuto, quelli dei worker no. Se il worker non si può creare, si ripiega sul timer.
+    let worker = null;
+    let workerUrl = null;
+    let intervalId = null;
+    try {
+      workerUrl = URL.createObjectURL(new Blob(["setInterval(() => postMessage(0), 5000);"], { type: "text/javascript" }));
+      worker = new Worker(workerUrl);
+      worker.onmessage = check;
+    } catch (_) {
+      intervalId = setInterval(check, 5000);
+    }
+    return () => {
+      if (worker) worker.terminate();
+      if (workerUrl) URL.revokeObjectURL(workerUrl);
+      if (intervalId) clearInterval(intervalId);
+    };
+  }, [isGestionale]);
+
   // Media Session: espone titolo/artista e i controlli play-pausa al sistema operativo
   // (notifica, lock screen, cuffie bluetooth, tasti multimediali). Oltre a essere comodo,
   // aiuta anche a far percepire al browser/OS la pagina come "riproduzione multimediale
@@ -930,8 +1081,15 @@ export default function RadioPucciotto() {
 
   useEffect(() => {
     if (!("mediaSession" in navigator)) return;
-    navigator.mediaSession.setActionHandler("play", () => { unlockAdAudio(); setIsPlaying(true); });
-    navigator.mediaSession.setActionHandler("pause", () => setIsPlaying(false));
+    navigator.mediaSession.setActionHandler("play", () => { unlockAdAudio(); userPausedRef.current = false; setIsPlaying(true); });
+    // Gestionale: il comando "pausa" del SISTEMA (tasti multimediali, cuffie bluetooth
+    // tolte/scollegate, una chiamata Teams/Zoom/WhatsApp che si prende l'audio, un'altra
+    // app che parte) va IGNORATO. Prima metteva in pausa la trasmissione intera — e con
+    // essa la radio per tutti gli ascoltatori — senza che nessuno avesse toccato la
+    // pagina: era una delle cause della "pausa da sola" a scheda in background. Il
+    // gestionale si mette in pausa solo dal suo pulsante. L'handler vuoto (non null)
+    // serve a impedire anche l'azione predefinita del browser (fermare i media).
+    navigator.mediaSession.setActionHandler("pause", isGestionale ? () => {} : () => { userPausedRef.current = true; setIsPlaying(false); });
     return () => {
       navigator.mediaSession.setActionHandler("play", null);
       navigator.mediaSession.setActionHandler("pause", null);
@@ -1353,7 +1511,12 @@ export default function RadioPucciotto() {
       // Il gestionale è connesso ma non sta trasmettendo (pausa, nessun brano
       // selezionato): senza questo, "nowPlaying" restava fermo all'ultimo brano
       // pubblicato e la vista pubblica risultava "LIVE" anche a trasmissione ferma.
-      set(ref(db, "nowPlaying"), null).catch((e) => console.warn("Firebase write error:", e));
+      // Solo se QUESTA scheda ha già trasmesso qualcosa: appena aperto (o ricaricato),
+      // il gestionale non è ancora in play, e prima questa scrittura spegneva la diretta
+      // per tutti — anche quella che stava andando da un'altra scheda del gestionale.
+      if (lastPublishedTrackIdRef.current !== null) {
+        set(ref(db, "nowPlaying"), null).catch((e) => console.warn("Firebase write error:", e));
+      }
       return;
     }
     const isNewTrack = lastPublishedTrackIdRef.current !== current.id;
@@ -1407,13 +1570,28 @@ export default function RadioPucciotto() {
   // sentiva alcun cambiamento nel bilanciamento spot/musica. Ora l'errore viene mostrato
   // anche nello stato a video, così il problema è visibile subito invece di restare
   // silenzioso.
-  useEffect(() => {
-    if (!isGestionale) return;
-    set(ref(db, "settings/adVolume"), adVolume).catch((e) => {
+  // Il valore si salva SOLO quando il gestore sposta lo slider (vedi onChange più sotto).
+  // Prima veniva scritto anche all'apertura del gestionale, col valore di default (70%):
+  // ogni volta che si apriva/ricaricava il gestionale, il volume spot scelto veniva perso
+  // per tutti gli ascoltatori. Ora all'apertura il gestionale LEGGE il valore salvato.
+  const adVolumeTouchedRef = useRef(false);
+  const saveAdVolume = (v) => {
+    adVolumeTouchedRef.current = true;
+    set(ref(db, "settings/adVolume"), v).catch((e) => {
       console.warn("Firebase write error:", e);
       setStatus("Errore salvataggio volume spot — controlla le regole del Realtime Database (" + e.message + ")");
     });
-  }, [adVolume, isGestionale]);
+  };
+  useEffect(() => {
+    if (!isGestionale) return;
+    get(ref(db, "settings/adVolume"))
+      .then((snapshot) => {
+        const v = snapshot.val();
+        // Se nel frattempo il gestore ha già spostato lo slider, vale la sua scelta.
+        if (typeof v === "number" && !adVolumeTouchedRef.current) setAdVolume(v);
+      })
+      .catch((e) => console.warn("Lettura volume spot non riuscita:", e));
+  }, [isGestionale]);
 
   // Vista pubblica: riceve il volume spot impostato dal gestionale e lo applica,
   // al posto del valore di default locale.
@@ -1579,6 +1757,33 @@ export default function RadioPucciotto() {
   // qualsiasi si ferma, resta fermo (dura pochi secondi): meglio uno spot che finisce un
   // attimo prima che uno che si riavvia in loop.
 
+  // Vista radio pubblica: diretta ferma (il gestionale ha messo in pausa o si è
+  // disconnesso). Prima l'ascoltatore continuava a sentire il brano fino alla fine mentre
+  // la pagina diceva "OFFLINE", e col pulsante disattivato non poteva nemmeno fermarlo.
+  // Ora, se la diretta resta ferma per 20 secondi, fermiamo anche il player locale. I 20
+  // secondi di tolleranza servono per i piccoli buchi di rete del gestionale: in quel
+  // caso la diretta torna da sola (vedi ripubblicazione alla riconnessione) e
+  // l'ascoltatore non si accorge di nulla. Quando la diretta riparte, il brano riparte da
+  // solo, a meno che l'ascoltatore non avesse messo in pausa lui.
+  useEffect(() => {
+    if (isGestionale || radioTrack) return;
+    if (lastPublicTrackKeyRef.current === null) return; // non stava suonando nulla
+    // L'ascoltatore mette in pausa durante i 20 secondi: fermiamo subito.
+    if (!isPlaying) {
+      ytPlayerRef.current?.pauseVideo?.();
+      if (audioRef.current) safePauseAudio(audioRef.current);
+    }
+    const id = setTimeout(() => {
+      lastPublicTrackKeyRef.current = null; // alla ripartenza verrà trattato come brano nuovo
+      lastPublicStartedAtRef.current = null;
+      keepAliveLoopRef.current = false;
+      ytPlayerRef.current?.pauseVideo?.();
+      if (audioRef.current) safePauseAudio(audioRef.current);
+      setIsPlaying(false);
+    }, 20000);
+    return () => clearTimeout(id);
+  }, [radioTrack, isPlaying, isGestionale]);
+
   // Vista radio pubblica: quando arriva/cambia radioTrack, carica il brano giusto
   // (YouTube o file custom) e si posiziona nel punto esatto di trasmissione, sincronizzato.
   // Gestisce ANCHE il play/pausa locale (isPlaying), tutto in un unico effetto, così non
@@ -1611,6 +1816,8 @@ export default function RadioPucciotto() {
           if (elapsed >= 0 && elapsed < (audioRef.current.duration || Infinity)) {
             audioRef.current.currentTime = elapsed;
           }
+          // L'ascoltatore aveva messo in pausa lui: il brano nuovo resta pronto ma fermo.
+          if (userPausedRef.current) return;
           // Al primo arrivo del brano tentiamo sempre l'autoplay (comportamento da "radio
           // live"); se il browser lo blocca perché manca un'interazione utente, isPlaying
           // resta false e l'utente vedrà il tasto Play pronto per partire manualmente.
@@ -1651,6 +1858,13 @@ export default function RadioPucciotto() {
       if (isNewTrack) {
         lastPublicTrackKeyRef.current = trackKey;
         keepAliveLoopRef.current = false; // arriva il brano vero: non è più il loop di attesa
+        if (userPausedRef.current) {
+          // L'ascoltatore aveva messo in pausa lui: prepariamo il brano nuovo SENZA farlo
+          // partire (prima loadVideoById lo avviava sempre). Al suo Play, il ramo
+          // "isPlaying" qui sotto lo riporta al punto giusto della diretta.
+          ytPlayerRef.current.cueVideoById({ videoId: radioTrack.videoId, startSeconds: elapsed });
+          return;
+        }
         armSuppressPause();
         ytPlayerRef.current.loadVideoById({ videoId: radioTrack.videoId, startSeconds: elapsed });
         ytPlayerRef.current.unMute?.();
@@ -1770,11 +1984,15 @@ export default function RadioPucciotto() {
           <button
             onClick={() => {
               unlockAdAudio();
-              setIsPlaying((p) => !p);
+              // Ricorda se è stato l'ascoltatore a mettere in pausa (vedi userPausedRef).
+              userPausedRef.current = isPlaying;
+              setIsPlaying(!isPlaying);
             }}
-            disabled={!isLive}
+            // Attivo anche a diretta ferma finché la musica sta ancora suonando (i 20 secondi
+            // di tolleranza): prima era disattivato e l'ascoltatore non poteva fermarla.
+            disabled={!isLive && !isPlaying}
             aria-label={isPlaying ? "Pausa" : "Play"}
-            style={{ width: 64, height: 64, borderRadius: "50%", background: isLive ? RED : "#444", border: "none", cursor: isLive ? "pointer" : "not-allowed", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: isLive ? `0 0 20px ${RED}55` : "none" }}>
+            style={{ width: 64, height: 64, borderRadius: "50%", background: isLive || isPlaying ? RED : "#444", border: "none", cursor: isLive || isPlaying ? "pointer" : "not-allowed", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: isLive || isPlaying ? `0 0 20px ${RED}55` : "none" }}>
             {isPlaying ? <Pause size={28} color={WHITE} fill={WHITE} /> : <Play size={28} color={WHITE} fill={WHITE} />}
           </button>
         </div>
@@ -2002,7 +2220,7 @@ export default function RadioPucciotto() {
           <div className="vol-control" style={{ display: "flex", alignItems: "center", gap: "10px", paddingTop: "4px", borderTop: "1px dashed rgba(26,26,26,0.1)" }}>
             <Volume2 size={16} color={RED} />
             <span style={{ fontSize: "12px", color: "#888", flexShrink: 0 }}>Volume spot</span>
-            <input type="range" min="0" max="1" step="0.05" value={adVolume} onChange={(e) => setAdVolume(parseFloat(e.target.value))} style={{ flex: 1, accentColor: RED }} />
+            <input type="range" min="0" max="1" step="0.05" value={adVolume} onChange={(e) => { const v = parseFloat(e.target.value); setAdVolume(v); saveAdVolume(v); }} style={{ flex: 1, accentColor: RED }} />
             <span style={{ fontSize: "11px", color: "#888", width: "34px", textAlign: "right", flexShrink: 0 }}>{Math.round(adVolume * 100)}%</span>
           </div>
 
