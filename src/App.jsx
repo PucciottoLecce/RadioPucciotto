@@ -385,10 +385,10 @@ export default function RadioPucciotto() {
       .catch(() => {});
   }, []);
 
-  // Carica automaticamente i brani per genere da YouTube Data API v3.
-  // Risultati cachati in localStorage per 18 ore per non consumare quota Google.
-  // Ad ogni scadenza alterna casualmente tra "più ascoltati del momento" (ultimo anno)
-  // e "più ascoltati di sempre" (tutti i tempi, ordinati per view totali).
+  // Carica automaticamente i brani più ascoltati in Europa (Italia compresa), Stati Uniti e America Latina da
+  // YouTube Data API v3: per ogni paese sia "del momento" (classifica del paese) sia
+  // "di sempre" (ordinati per view totali). Risultati cachati in localStorage per 18
+  // ore per non consumare quota Google.
   useEffect(() => {
     // SOLO il gestionale interroga l'API YouTube: è l'unico che deve scegliere i brani.
     // Gli ascoltatori ricevono TUTTO da Firebase (brano + spot) e non usano affatto questa
@@ -402,7 +402,9 @@ export default function RadioPucciotto() {
       return;
     }
 
-    const CACHE_KEY = "rp_yt_cache";
+    // Chiave nuova: la cache vecchia conteneva la playlist globale per generi (con i
+    // brani indiani/russi ecc.) e non deve essere riusata.
+    const CACHE_KEY = "rp_yt_cache_eu_am";
     // Alzata da 4 a 18 ore: con la chiave condivisa tra tutti i visitatori, ogni
     // scadenza cache moltiplicata per tanti browser è proprio ciò che genera le
     // raffiche che fanno scattare rateLimitExceeded (vedi anche il fix sotto sullo
@@ -432,21 +434,27 @@ export default function RadioPucciotto() {
       };
     })();
 
-    const GENRES = [
-      { label: "Pop",          query: "pop music",              lang: "en" },
-      { label: "Rock",         query: "rock music",             lang: "en" },
-      { label: "Elettronica",  query: "electronic dance music", lang: "en" },
-      { label: "Hip Hop",      query: "hip hop music",          lang: "en" },
-      { label: "Reggaeton",    query: "reggaeton",              lang: "es" },
-      { label: "RnB",          query: "rnb music",              lang: "en" },
-      { label: "Indie",        query: "indie pop music",        lang: "en" },
-      { label: "Dance",        query: "dance pop music",        lang: "en" },
+    // Niente più ricerche per genere su scala globale (regionCode=US): erano quelle a
+    // tirare dentro brani indiani, russi, asiatici ecc. che nessun filtro riusciva a
+    // bloccare del tutto. Ora la playlist nasce direttamente dalle classifiche dei
+    // paesi europei (Italia compresa), degli Stati Uniti e dell'America Latina: per
+    // ogni paese prendiamo sia i più ascoltati
+    // DEL MOMENTO (classifica musicale YouTube del paese) sia quelli DI SEMPRE
+    // (ricerca ordinata per visualizzazioni totali, ristretta a paese e lingua).
+    const SOURCES = [
+      { label: "Italia",          region: "IT", lang: "it", query: "canzoni italiane" },
+      { label: "Internazionali",  region: "GB", lang: "en", query: "pop hits" },
+      { label: "Spagna",          region: "ES", lang: "es", query: "canciones españolas" },
+      { label: "Francia",         region: "FR", lang: "fr", query: "chanson française" },
+      { label: "Germania",        region: "DE", lang: "de", query: "deutsche musik" },
+      { label: "Americane",       region: "US", lang: "en", query: "american pop hits" },
+      { label: "Latine",          region: "MX", lang: "es", query: "musica latina reggaeton" },
     ];
-    const PER_GENRE = 15;
+    const PER_SLICE = 15;
 
-    const isTrending = Math.random() < 0.5;
-    const currentYear = new Date().getFullYear();
-    const publishedAfter = isTrending ? `${currentYear - 1}-01-01T00:00:00Z` : null;
+    // "Del momento" = pubblicati nell'ultimo anno (usato solo se la classifica del
+    // paese non è disponibile e si ripiega sulla ricerca).
+    const trendingSince = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString();
 
     const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
 
@@ -469,17 +477,15 @@ export default function RadioPucciotto() {
         return r.json();
       });
 
-    const fetchSlice = ({ label, query, lang }) => {
-      const q = encodeURIComponent(`${query} official music video`);
-      let url = `https://www.googleapis.com/youtube/v3/search?part=snippet&q=${q}&type=video&videoCategoryId=10&order=viewCount&maxResults=${PER_GENRE}&regionCode=US&relevanceLanguage=${lang}&key=${YOUTUBE_API_KEY}`;
-      if (publishedAfter) url += `&publishedAfter=${publishedAfter}`;
-      return fetchJsonWithRetry(url, label)
-        .then((data) => {
-          // Blocca i titoli/canali scritti in alfabeti non latini: indiani (devanagari,
+    // Filtro di sicurezza sui risultati (ora \u00E8 solo una rete di riserva: le fonti sono
+    // gi\u00E0 europee) + conversione nel formato brano della radio.
+    const toTracks = (items, label, getVideoId) => {
+          // Blocca i titoli/canali scritti in alfabeti non latini: cirillico (russo ecc.),
+          // armeno, georgiano, ebraico, indiani (devanagari,
           // bengali, gurmukhi, gujarati, oriya, tamil, telugu, kannada, malayalam,
           // singalese), sud-est asiatico (thai, lao, khmer, birmano), Asia orientale
           // (CJK, hangul, kana), arabo (con forme di presentazione) ed etiope.
-          const hasNonLatin = (str) => /[\u0600-\u06FF\u0750-\u077F\u0900-\u097F\u0980-\u09FF\u0A00-\u0A7F\u0A80-\u0AFF\u0B00-\u0B7F\u0B80-\u0BFF\u0C00-\u0C7F\u0C80-\u0CFF\u0D00-\u0D7F\u0D80-\u0DFF\u0E00-\u0E7F\u0E80-\u0EFF\u0F00-\u0FFF\u1000-\u109F\u1100-\u11FF\u1200-\u137F\u1780-\u17FF\u3000-\u9FFF\uA000-\uA48F\uAC00-\uD7AF\uF900-\uFAFF\uFB50-\uFDFF\uFE70-\uFEFF\u3400-\u4DBF]/.test(str);
+          const hasNonLatin = (str) => /[\u0400-\u052F\u0530-\u058F\u0590-\u05FF\u10A0-\u10FF\u0600-\u06FF\u0750-\u077F\u0900-\u097F\u0980-\u09FF\u0A00-\u0A7F\u0A80-\u0AFF\u0B00-\u0B7F\u0B80-\u0BFF\u0C00-\u0C7F\u0C80-\u0CFF\u0D00-\u0D7F\u0D80-\u0DFF\u0E00-\u0E7F\u0E80-\u0EFF\u0F00-\u0FFF\u1000-\u109F\u1100-\u11FF\u1200-\u137F\u1780-\u17FF\u3000-\u9FFF\uA000-\uA48F\uAC00-\uD7AF\uF900-\uFAFF\uFB50-\uFDFF\uFE70-\uFEFF\u3400-\u4DBF]/.test(str);
           const isSpam = (title) => {
             if (title.length > 80) return true;
             const t = title.toLowerCase();
@@ -517,6 +523,12 @@ export default function RadioPucciotto() {
             "khmer", "myanmar song", "mongolian song", "kazakh", "uzbek",
             "turkish song", "turkish music", "arabic", "arab song", "persian", "farsi",
             "iranian", "afghan",
+            // Etichette/canali indiani con miliardi di view: spuntano soprattutto nelle
+            // ricerche "di sempre" sugli Stati Uniti, dove i titoli sono spesso in inglese.
+            "t-series", "tseries", "zee music", "saregama", "sony music india",
+            "speed records", "tips official", "yrf", "aditya music", "lahari", "shemaroo",
+            // Russia / area ex sovietica (titoli traslitterati in caratteri latini)
+            "russian", "russkaya", "russkie", "pesni",
             // Africa
             "afrobeat", "afrobeats", "amapiano", "naija", "nigerian", "ghanaian",
             "kenyan", "tanzanian", "ugandan", "congolese", "senegalese", "swahili",
@@ -525,7 +537,7 @@ export default function RadioPucciotto() {
             "azonto", "african song", "african music", "afro pop", "afropop",
           ].join("|") + ")\\b");
           const isForeignLatin = (str) => FOREIGN_KEYWORDS.test(str.toLowerCase());
-          return (data.items || [])
+          return (items || [])
             .filter((it) => {
               const title = it.snippet.title;
               const channel = it.snippet.channelTitle;
@@ -533,8 +545,8 @@ export default function RadioPucciotto() {
                 && !isForeignLatin(title) && !isForeignLatin(channel);
             })
             .map((it) => ({
-              id: it.id.videoId + "_" + label,
-              videoId: it.id.videoId,
+              id: getVideoId(it) + "_" + label,
+              videoId: getVideoId(it),
               title: it.snippet.title,
               artist: it.snippet.channelTitle,
               category: label,
@@ -542,12 +554,37 @@ export default function RadioPucciotto() {
               isCustom: false,
               url: null,
             }));
-        })
+    };
+
+    // Più ascoltati DI SEMPRE nel paese: ricerca ordinata per visualizzazioni totali,
+    // ristretta alla regione e alla lingua del paese.
+    const searchSlice = ({ label, region, lang, query }, publishedAfter) => {
+      const q = encodeURIComponent(`${query} official music video`);
+      let url = `https://www.googleapis.com/youtube/v3/search?part=snippet&q=${q}&type=video&videoCategoryId=10&order=viewCount&maxResults=${PER_SLICE}&regionCode=${region}&relevanceLanguage=${lang}&key=${YOUTUBE_API_KEY}`;
+      if (publishedAfter) url += `&publishedAfter=${publishedAfter}`;
+      return fetchJsonWithRetry(url, label)
+        .then((data) => toTracks(data.items, label, (it) => it.id.videoId))
         .catch((err) => { console.warn(err.message || err); return []; });
     };
 
-    // Le 8 richieste NON partono più tutte insieme: le scaglioniamo di ~300ms l'una
-    // dall'altra. Sparare 8 fetch in un colpo solo (moltiplicato per tutti i visitatori
+    // Più ascoltati DEL MOMENTO nel paese: classifica musicale di YouTube per quella
+    // regione (costa 1 unità di quota invece delle 100 di una ricerca). Se per quel
+    // paese la classifica non è disponibile, ripiega su una ricerca per visualizzazioni
+    // limitata ai brani dell'ultimo anno.
+    const chartSlice = (source) => {
+      const { label, region } = source;
+      const url = `https://www.googleapis.com/youtube/v3/videos?part=snippet&chart=mostPopular&videoCategoryId=10&regionCode=${region}&maxResults=${PER_SLICE}&key=${YOUTUBE_API_KEY}`;
+      return fetchJsonWithRetry(url, label)
+        .then((data) => toTracks(data.items, label, (it) => it.id))
+        .catch((err) => { console.warn(err.message || err); return []; })
+        .then((list) => (list.length ? list : searchSlice(source, trendingSince)));
+    };
+
+    const fetchSlice = (source) => Promise.all([chartSlice(source), searchSlice(source, null)])
+      .then(([momento, sempre]) => [...momento, ...sempre]);
+
+    // Le richieste NON partono tutte insieme: le scaglioniamo di ~300ms l'una
+    // dall'altra. Sparare tutti i fetch in un colpo solo (moltiplicato per tutti i visitatori
     // che aprono la radio nello stesso momento, sulla stessa chiave API) è proprio ciò
     // che generava le raffiche dietro il rateLimitExceeded (429) osservato in console.
     const STAGGER_MS = 300;
@@ -560,18 +597,18 @@ export default function RadioPucciotto() {
       return Promise.all(promises);
     };
 
-    runStaggered(GENRES, fetchSlice, STAGGER_MS)
+    runStaggered(SOURCES, fetchSlice, STAGGER_MS)
       .then((arrays) => {
         const mapped = arrays.flat();
         if (!mapped.length) throw new Error("Nessun brano trovato");
-        // Rimuove duplicati per videoId (stesso video in più generi o ricerche)
+        // Rimuove duplicati per videoId (stesso video in più paesi o classifiche)
         const seen = new Set();
         const deduped = mapped.filter((t) => {
           if (seen.has(t.videoId)) return false;
           seen.add(t.videoId);
           return true;
         });
-        const label = isTrending ? "🔥 Più ascoltati del momento" : "🏆 Più ascoltati di sempre";
+        const label = "🔥 Più ascoltati in Europa, America e America Latina: del momento e di sempre";
         // Salva in cache
         try {
           localStorage.setItem(CACHE_KEY, JSON.stringify({ tracks: deduped, label, ts: Date.now() }));
