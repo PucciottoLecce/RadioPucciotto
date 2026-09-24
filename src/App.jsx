@@ -33,6 +33,8 @@ const YOUTUBE_FALLBACK_TRACKS = [
   { id: "yt8", videoId: "OPf0YbXqDm0", title: "Uptown Funk",              artist: "Bruno Mars",    category: "Funk",        color: "#d35400" },
 ].map((t) => ({ ...t, url: null, isCustom: false }));
 
+// Gli spot vanno in onda A ROTAZIONE, in quest'ordine: 1 → 2 → 3 → 1 … Per aggiungere
+// uno spot basta mettere il file in public/ads/ e aggiungerlo in fondo a questa lista.
 const AD_SPOTS = [
   "/ads/spot-piucciotto.mp3",
   "/ads/spot-piucciotto-2.mp3",
@@ -150,7 +152,12 @@ export default function RadioPucciotto() {
   const isDuckingRef = useRef(false);
   // Id del timeout di sicurezza dello spot in corso (vedi armSpotRestore).
   const spotSafetyTimerRef = useRef(null);
-  const lastSpotIndexRef = useRef(-1);
+  // Posizione del PROSSIMO spot nella rotazione di AD_SPOTS. È ricordata dal browser del
+  // gestionale, così dopo un ricaricamento la rotazione riprende da dove era rimasta
+  // invece di ripartire sempre dal primo spot.
+  const nextSpotIndexRef = useRef((() => {
+    try { const v = parseInt(localStorage.getItem("rp_next_spot"), 10); return v >= 0 ? v : 0; } catch (_) { return 0; }
+  })());
   // Contatore degli errori YouTube consecutivi (video non incorporabili/rimossi): serve a
   // frenare l'auto-skip, altrimenti una serie di video "morti" fa saltare tutta la
   // playlist a raffica senza mai suonare.
@@ -1296,11 +1303,14 @@ export default function RadioPucciotto() {
     setIsPlaying(true);
   };
 
-  const pickRandomSpot = () => {
-    if (AD_SPOTS.length === 1) return AD_SPOTS[0];
-    let idx;
-    do { idx = Math.floor(Math.random() * AD_SPOTS.length); } while (idx === lastSpotIndexRef.current);
-    lastSpotIndexRef.current = idx;
+  // Rotazione fissa: 1 → 2 → 3 → 1 … Prima lo spot era scelto a caso (evitando solo di
+  // ripetere l'ultimo), quindi poteva uscire 1, 2, 1, 2… e uno spot restare fuori a lungo.
+  // Viene chiamata solo quando lo spot parte davvero, quindi uno spot scartato non fa
+  // avanzare la rotazione.
+  const pickNextSpot = () => {
+    const idx = nextSpotIndexRef.current % AD_SPOTS.length;
+    nextSpotIndexRef.current = (idx + 1) % AD_SPOTS.length;
+    try { localStorage.setItem("rp_next_spot", String(nextSpotIndexRef.current)); } catch (_) { /* resta la rotazione in memoria */ }
     return AD_SPOTS[idx];
   };
 
@@ -1452,7 +1462,7 @@ export default function RadioPucciotto() {
     // Cooldown condiviso: non far partire un altro spot se ne è appena finito uno
     // (avviato dall'altro meccanismo), anche se ora sono passati i suoi N minuti.
     if ((Date.now() - lastAdEndedAtRef.current) / 1000 < MIN_GAP_BETWEEN_ADS_S) return;
-    const spotUrl = pickRandomSpot();
+    const spotUrl = pickNextSpot();
     // Abbassiamo la musica (ducking) tramite applyMusicVolume: agisce su ENTRAMBI i
     // player (YouTube + <audio>), così se il brano cambia tipo durante lo spot nessuno
     // dei due resta abbassato. Il flag isDuckingRef fa sì che anche spostando lo slider
