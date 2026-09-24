@@ -48,6 +48,13 @@ proprietario **in italiano**, in modo semplice e senza gergo tecnico.
   - Ascoltatori: se mettono in pausa, il brano dopo non riparte da solo; se la
     diretta si ferma, dopo 20 s (tolleranza per i buchi di rete) si ferma anche
     il loro player.
+- **PR #4**: timer degli spot, battito di sincronizzazione e controllo del player
+  girano su `startTicker` (Web Worker), così restano regolari anche col gestionale
+  in background e silenzioso (muto generale). Uno spot scartato perché il
+  precedente era ancora in corso o appena finito non fa più saltare un giro intero
+  del timer. Verificati in prova: tempi degli spot, musica abbassata al 50% durante
+  lo spot, volume spot = volume generale × volume spot (gestionale e ascoltatori),
+  ripristino a fine spot.
 - **Per tornare indietro:** fare il revert del commit di merge della PR su `main`
   (Cloudflare ripubblica da solo).
 - La chiave della cache della playlist nel browser (`CACHE_KEY`, ora
