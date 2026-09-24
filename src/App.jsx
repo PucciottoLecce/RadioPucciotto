@@ -385,7 +385,7 @@ export default function RadioPucciotto() {
       .catch(() => {});
   }, []);
 
-  // Carica automaticamente i brani più ascoltati in Europa (Italia compresa) da
+  // Carica automaticamente i brani più ascoltati in Europa (Italia compresa), Stati Uniti e America Latina da
   // YouTube Data API v3: per ogni paese sia "del momento" (classifica del paese) sia
   // "di sempre" (ordinati per view totali). Risultati cachati in localStorage per 18
   // ore per non consumare quota Google.
@@ -404,7 +404,7 @@ export default function RadioPucciotto() {
 
     // Chiave nuova: la cache vecchia conteneva la playlist globale per generi (con i
     // brani indiani/russi ecc.) e non deve essere riusata.
-    const CACHE_KEY = "rp_yt_cache_eu";
+    const CACHE_KEY = "rp_yt_cache_eu_am";
     // Alzata da 4 a 18 ore: con la chiave condivisa tra tutti i visitatori, ogni
     // scadenza cache moltiplicata per tanti browser è proprio ciò che genera le
     // raffiche che fanno scattare rateLimitExceeded (vedi anche il fix sotto sullo
@@ -437,7 +437,8 @@ export default function RadioPucciotto() {
     // Niente più ricerche per genere su scala globale (regionCode=US): erano quelle a
     // tirare dentro brani indiani, russi, asiatici ecc. che nessun filtro riusciva a
     // bloccare del tutto. Ora la playlist nasce direttamente dalle classifiche dei
-    // paesi europei, Italia compresa: per ogni paese prendiamo sia i più ascoltati
+    // paesi europei (Italia compresa), degli Stati Uniti e dell'America Latina: per
+    // ogni paese prendiamo sia i più ascoltati
     // DEL MOMENTO (classifica musicale YouTube del paese) sia quelli DI SEMPRE
     // (ricerca ordinata per visualizzazioni totali, ristretta a paese e lingua).
     const SOURCES = [
@@ -446,6 +447,8 @@ export default function RadioPucciotto() {
       { label: "Spagna",          region: "ES", lang: "es", query: "canciones españolas" },
       { label: "Francia",         region: "FR", lang: "fr", query: "chanson française" },
       { label: "Germania",        region: "DE", lang: "de", query: "deutsche musik" },
+      { label: "Americane",       region: "US", lang: "en", query: "american pop hits" },
+      { label: "Latine",          region: "MX", lang: "es", query: "musica latina reggaeton" },
     ];
     const PER_SLICE = 15;
 
@@ -520,6 +523,10 @@ export default function RadioPucciotto() {
             "khmer", "myanmar song", "mongolian song", "kazakh", "uzbek",
             "turkish song", "turkish music", "arabic", "arab song", "persian", "farsi",
             "iranian", "afghan",
+            // Etichette/canali indiani con miliardi di view: spuntano soprattutto nelle
+            // ricerche "di sempre" sugli Stati Uniti, dove i titoli sono spesso in inglese.
+            "t-series", "tseries", "zee music", "saregama", "sony music india",
+            "speed records", "tips official", "yrf", "aditya music", "lahari", "shemaroo",
             // Russia / area ex sovietica (titoli traslitterati in caratteri latini)
             "russian", "russkaya", "russkie", "pesni",
             // Africa
@@ -601,7 +608,7 @@ export default function RadioPucciotto() {
           seen.add(t.videoId);
           return true;
         });
-        const label = "🔥 Più ascoltati in Europa: del momento e di sempre";
+        const label = "🔥 Più ascoltati in Europa, America e America Latina: del momento e di sempre";
         // Salva in cache
         try {
           localStorage.setItem(CACHE_KEY, JSON.stringify({ tracks: deduped, label, ts: Date.now() }));
