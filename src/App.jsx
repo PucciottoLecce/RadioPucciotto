@@ -1389,10 +1389,26 @@ export default function RadioPucciotto() {
       try {
         const buf = ctx.createBuffer(1, Math.max(1, Math.floor(ctx.sampleRate / 2)), ctx.sampleRate);
         const src = ctx.createBufferSource();
-        src.buffer = buf; // buffer di zeri = mezzo secondo di puro silenzio
-        src.loop = true;
         const g = ctx.createGain();
-        g.gain.value = 0.0001; // non zero: a zero il browser lo considera "muto" e sospende comunque
+        if (isGestionale) {
+          // GESTIONALE: un buffer di zeri (come prima) è silenzio vero, e il browser lo
+          // misura come tale: con la scheda in background e senza altro audio (muto
+          // generale, volume a zero, player fermo) la considerava "silenziosa" e dopo
+          // qualche minuto la CONGELAVA per risparmiare energia. Si fermava tutto,
+          // compreso il collegamento a Firebase (la radio risultava OFFLINE), e ripartiva
+          // da dove era rimasta solo tornando sulla scheda. Ora suona un tono a 20 Hz a
+          // -60 dB: non si sente (orecchio e altoparlanti non lo riproducono a quel
+          // livello), ma supera la soglia sotto cui il browser considera la scheda muta,
+          // quindi non viene più congelata. 10 cicli esatti in mezzo secondo: il loop è
+          // continuo, senza "click".
+          const data = buf.getChannelData(0);
+          for (let i = 0; i < data.length; i++) data[i] = Math.sin((2 * Math.PI * 20 * i) / ctx.sampleRate);
+          g.gain.value = 0.001;
+        } else {
+          g.gain.value = 0.0001; // buffer di zeri: basta a tenere vivo il contesto per gli spot
+        }
+        src.buffer = buf;
+        src.loop = true;
         src.connect(g).connect(ctx.destination);
         src.start(0);
         silentLoopRef.current = src;

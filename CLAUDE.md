@@ -67,6 +67,14 @@ proprietario **in italiano**, in modo semplice e senza gergo tecnico.
   `@media (max-width: 600px), (max-height: 700px)` misure proporzionate
   all'altezza visibile (`dvh`, con `vh` di riserva) e titoli al massimo su 2 righe.
   Il gestionale da telefono invece scorre, per via della playlist lunga.
+- **PR #7**: il gestionale in background veniva ancora CONGELATO dal browser
+  (scheda silenziosa → risparmio energetico): si fermava tutto, la radio andava
+  OFFLINE e ripartiva da dove era rimasta solo tornando sulla scheda. Il loop di
+  sottofondo del gestionale (`kickAudioEngine`) ora suona un tono a 20 Hz a −60 dBFS,
+  impercettibile ma sopra la soglia "scheda muta" dei browser (circa −72 dBFS),
+  anche col Muto generale. La radio degli ascoltatori è invariata (buffer di zeri).
+  Rimedio aggiuntivo lato utente: in Chrome/Edge aggiungere il sito a "mantieni
+  sempre attivi / non mettere in sospensione".
 - **Per tornare indietro:** fare il revert del commit di merge della PR su `main`
   (Cloudflare ripubblica da solo).
 - La chiave della cache della playlist nel browser (`CACHE_KEY`, ora
