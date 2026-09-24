@@ -404,7 +404,7 @@ export default function RadioPucciotto() {
 
     // Chiave nuova: la cache vecchia conteneva la playlist globale per generi (con i
     // brani indiani/russi ecc.) e non deve essere riusata.
-    const CACHE_KEY = "rp_yt_cache_eu_am";
+    const CACHE_KEY = "rp_yt_cache_eu_am_v2"; // v2: esclusi i video non incorporabili
     // Alzata da 4 a 18 ore: con la chiave condivisa tra tutti i visitatori, ogni
     // scadenza cache moltiplicata per tanti browser è proprio ciò che genera le
     // raffiche che fanno scattare rateLimitExceeded (vedi anche il fix sotto sullo
@@ -560,7 +560,7 @@ export default function RadioPucciotto() {
     // ristretta alla regione e alla lingua del paese.
     const searchSlice = ({ label, region, lang, query }, publishedAfter) => {
       const q = encodeURIComponent(`${query} official music video`);
-      let url = `https://www.googleapis.com/youtube/v3/search?part=snippet&q=${q}&type=video&videoCategoryId=10&order=viewCount&maxResults=${PER_SLICE}&regionCode=${region}&relevanceLanguage=${lang}&key=${YOUTUBE_API_KEY}`;
+      let url = `https://www.googleapis.com/youtube/v3/search?part=snippet&q=${q}&type=video&videoCategoryId=10&videoEmbeddable=true&order=viewCount&maxResults=${PER_SLICE}&regionCode=${region}&relevanceLanguage=${lang}&key=${YOUTUBE_API_KEY}`;
       if (publishedAfter) url += `&publishedAfter=${publishedAfter}`;
       return fetchJsonWithRetry(url, label)
         .then((data) => toTracks(data.items, label, (it) => it.id.videoId))
@@ -573,9 +573,12 @@ export default function RadioPucciotto() {
     // limitata ai brani dell'ultimo anno.
     const chartSlice = (source) => {
       const { label, region } = source;
-      const url = `https://www.googleapis.com/youtube/v3/videos?part=snippet&chart=mostPopular&videoCategoryId=10&regionCode=${region}&maxResults=${PER_SLICE}&key=${YOUTUBE_API_KEY}`;
+      const url = `https://www.googleapis.com/youtube/v3/videos?part=snippet,status&chart=mostPopular&videoCategoryId=10&regionCode=${region}&maxResults=${PER_SLICE}&key=${YOUTUBE_API_KEY}`;
       return fetchJsonWithRetry(url, label)
-        .then((data) => toTracks(data.items, label, (it) => it.id))
+        // Scarta i video che il proprietario non permette di riprodurre fuori da YouTube
+        // (frequenti tra i video ufficiali in classifica): nel player darebbero errore
+        // 101/150 e verrebbero saltati a raffica.
+        .then((data) => toTracks((data.items || []).filter((it) => it.status?.embeddable !== false), label, (it) => it.id))
         .catch((err) => { console.warn(err.message || err); return []; })
         .then((list) => (list.length ? list : searchSlice(source, trendingSince)));
     };
@@ -715,9 +718,14 @@ export default function RadioPucciotto() {
             ytErrorCountRef.current = (now - ytLastErrorAtRef.current < 12000) ? ytErrorCountRef.current + 1 : 1;
             ytLastErrorAtRef.current = now;
             if (ytErrorCountRef.current > 5) {
-              // Troppi brani non incorporabili di fila: ci fermiamo invece di raffichare.
-              setStatus("Diversi brani non sono incorporabili da YouTube — in pausa. Prova a cambiare categoria o a ricaricare.");
-              setIsPlaying(false);
+              // Troppi brani non incorporabili di fila: invece di raffichare facciamo una
+              // pausa di 30 secondi e poi riproviamo col successivo. Prima qui la radio si
+              // FERMAVA del tutto (isPlaying=false) e restava ferma finché qualcuno non
+              // tornava sulla pagina a premere Play: un'altra "pausa da sola" a scheda in
+              // background. Se nel frattempo il gestore preme Pausa, non si riparte.
+              setStatus("Diversi brani di fila non sono incorporabili da YouTube — riprovo tra 30 secondi…");
+              ytErrorCountRef.current = 0;
+              setTimeout(() => { if (isPlayingRef.current) goNextRef.current(); }, 30000);
               return;
             }
             setStatus("Brano non disponibile, passo al prossimo…");
@@ -909,6 +917,42 @@ export default function RadioPucciotto() {
     return () => document.removeEventListener("visibilitychange", onVis);
   }, [isGestionale]);
 
+  // Gestionale: "cane da guardia" della riproduzione, attivo ANCHE a scheda in background.
+  // Il recupero qui sopra scatta solo quando si torna sulla scheda: se nel frattempo il
+  // browser (o l'iframe YouTube) aveva messo in pausa il player, la radio restava muta
+  // finché il gestore non tornava sulla pagina — la "pausa da sola" mentre si lavora su
+  // altro. Ogni 5 secondi controlliamo: se la trasmissione DOVREBBE suonare ma il player
+  // risulta fermo in pausa per due controlli di fila (almeno 5 secondi, quindi non un
+  // semplice buffering, che è uno stato diverso), lo facciamo ripartire.
+  useEffect(() => {
+    if (!isGestionale) return;
+    let stalledChecks = 0;
+    const id = setInterval(() => {
+      const c = currentRef.current;
+      if (!isPlayingRef.current || !c) { stalledChecks = 0; return; }
+      let stalled = false;
+      if (c.isCustom) {
+        const a = audioRef.current;
+        // !ended: a fine mp3 ci pensa onEnded (goNext); ri-avviarlo lo farebbe ripartire da capo.
+        stalled = !!a && !!a.src && a.paused && !a.ended;
+      } else {
+        const state = ytPlayerRef.current?.getPlayerState?.();
+        const S = window.YT?.PlayerState;
+        stalled = !!S && (state === S.PAUSED || state === S.CUED);
+      }
+      stalledChecks = stalled ? stalledChecks + 1 : 0;
+      if (stalledChecks < 2) return;
+      stalledChecks = 0;
+      if (c.isCustom) {
+        safePlayAudio(audioRef.current).catch(() => {});
+      } else {
+        armSuppressPause();
+        ytPlayerRef.current?.playVideo?.();
+      }
+    }, 5000);
+    return () => clearInterval(id);
+  }, [isGestionale]);
+
   // Media Session: espone titolo/artista e i controlli play-pausa al sistema operativo
   // (notifica, lock screen, cuffie bluetooth, tasti multimediali). Oltre a essere comodo,
   // aiuta anche a far percepire al browser/OS la pagina come "riproduzione multimediale
@@ -931,7 +975,14 @@ export default function RadioPucciotto() {
   useEffect(() => {
     if (!("mediaSession" in navigator)) return;
     navigator.mediaSession.setActionHandler("play", () => { unlockAdAudio(); setIsPlaying(true); });
-    navigator.mediaSession.setActionHandler("pause", () => setIsPlaying(false));
+    // Gestionale: il comando "pausa" del SISTEMA (tasti multimediali, cuffie bluetooth
+    // tolte/scollegate, una chiamata Teams/Zoom/WhatsApp che si prende l'audio, un'altra
+    // app che parte) va IGNORATO. Prima metteva in pausa la trasmissione intera — e con
+    // essa la radio per tutti gli ascoltatori — senza che nessuno avesse toccato la
+    // pagina: era una delle cause della "pausa da sola" a scheda in background. Il
+    // gestionale si mette in pausa solo dal suo pulsante. L'handler vuoto (non null)
+    // serve a impedire anche l'azione predefinita del browser (fermare i media).
+    navigator.mediaSession.setActionHandler("pause", isGestionale ? () => {} : () => setIsPlaying(false));
     return () => {
       navigator.mediaSession.setActionHandler("play", null);
       navigator.mediaSession.setActionHandler("pause", null);
