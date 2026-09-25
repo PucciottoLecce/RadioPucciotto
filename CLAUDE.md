@@ -8,7 +8,8 @@ proprietario **in italiano**, in modo semplice e senza gergo tecnico.
 - App React + Vite, quasi tutto in `src/App.jsx`. Pubblicata su **Cloudflare
   Pages** da `main`. La variabile `VITE_YOUTUBE_API_KEY` è impostata su Cloudflare.
 - **Due modalità nella stessa pagina:**
-  - `/?gestionale`: il **gestionale**. È l'unico che sceglie i brani (API YouTube)
+  - `/gestionale`: il **gestionale** (dalla PR #12; prima era `/?gestionale`, che
+    ora apre la radio pubblica). È l'unico che sceglie i brani (API YouTube)
     e trasmette su Firebase.
   - `/`: la **radio pubblica** (ascoltatori). Riceve tutto da Firebase e non usa
     l'API YouTube.
@@ -93,7 +94,12 @@ proprietario **in italiano**, in modo semplice e senza gergo tecnico.
   sotto lo spot. Nel browser di prova (YouTube finto) il blocco non si riproduceva:
   la causa è nel comportamento del player YouTube vero. Torna il comportamento
   precedente (lo spot si ferma quando il gestionale lo chiude). Non riprovare questa
-  strada senza prima riprodurre il blocco con il player vero.
+  strada senza prima riprodurre il blocco con il player vero. La seconda parte
+  della PR #9 (primo tocco che non interrompe uno spot in `<audio>`) è uscita con
+  lei: beneficio minimo, rimetterla solo se qualcuno segnala spot interrotti al
+  primo tocco.
+- **PR #12**: gestionale spostato su `/gestionale` (percorso vero), primo passo
+  della sicurezza: Cloudflare Access protegge un percorso, non `?gestionale`.
 - **PR #10**: canzoni indiane (punjabi) ancora presenti in "Internazionali" (la
   classifica GB ne è piena, con titoli in inglese). La verifica finale
   (`keepPlayable`, `videos.list part=snippet,status,contentDetails`, stessa quota)
@@ -108,6 +114,15 @@ proprietario **in italiano**, in modo semplice e senza gergo tecnico.
   altrimenti la vecchia playlist resta per 18 ore.
 
 ## Punti ancora aperti
+
+- **Sicurezza, piano concordato:** (1) Cloudflare Access (Zero Trust, gratis) su
+  `/gestionale` con codice via email = secondo fattore; (2) login Firebase
+  (email/password) nel gestionale, caricato solo lì; (3) regole del Realtime
+  Database: lettura pubblica, scrittura solo per l'UID del proprietario
+  `rQuRDBStbaMqbtUyLmP9634VSZT2` (utente Firebase già creato), con validazione dei
+  dati. Le regole vanno messe SOLO dopo che il login è online e verificato,
+  altrimenti il gestionale non può più trasmettere. Serve ancora il `firebaseConfig`
+  dell'app Web (apiKey, authDomain, projectId, appId: non segreti).
 
 - **Sicurezza** (serve il proprietario): chiunque aggiunga `?gestionale`
   all'indirizzo può trasmettere; Firebase non ha login. La chiave YouTube va

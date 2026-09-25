@@ -76,12 +76,15 @@ function shuffleArray(arr) {
 }
 
 export default function RadioPucciotto() {
-  // Determina modalità all'avvio: ?gestionale nell'URL = pannello admin.
+  // Determina modalità all'avvio: indirizzo /gestionale = pannello admin.
   // DEVE stare qui, prima di ogni altra cosa: viene usata anche dentro le dependency
   // array di alcuni useEffect più sotto, e quelle vengono valutate SUBITO durante il
   // render (non in modo differito come il corpo degli effetti) — dichiararla più in
   // basso nel file causava un errore che bloccava il caricamento dell'intera pagina.
-  const isGestionale = window.location.search.includes("gestionale");
+  // Il gestionale sta all'indirizzo /gestionale (non più "?gestionale"): Cloudflare
+  // Access può proteggere un PERCORSO (/gestionale) con il secondo fattore, ma non la
+  // parte "?..." dell'indirizzo. Il vecchio "/?gestionale" ora apre la radio pubblica.
+  const isGestionale = window.location.pathname.replace(/\/+$/, "") === "/gestionale";
   const [tracks, setTracks] = useState(YOUTUBE_FALLBACK_TRACKS);
   const [customTracks, setCustomTracks] = useState([]);
 
@@ -338,7 +341,7 @@ export default function RadioPucciotto() {
     return finish;
   };
 
-  // Determina modalità all'avvio: ?gestionale nell'URL = pannello admin
+  // Modalità (gestionale o radio pubblica): vedi isGestionale all'inizio del componente.
 
   // Lista base (jamendo + custom), mai shuffled
   const baseList = useMemo(() => [...tracks, ...customTracks], [tracks, customTracks]);
