@@ -784,6 +784,16 @@ export default function RadioPucciotto() {
                 // bloccato dall'autoplay del browser (l'iframe YouTube è un dominio diverso,
                 // il click sul nostro Play non lo sblocca in modo permanente). Lo teniamo
                 // "vivo" in loop silenzioso finché non arriva il brano vero.
+                //
+                // MA: se secondo il gestionale al brano in onda mancano ancora più di 20
+                // secondi, questo "fine brano" non può riguardarlo: è quello del brano
+                // VECCHIO arrivato in ritardo, dopo che era già partito il nuovo (succede
+                // quando radio e gestionale vanno perfettamente a tempo, es. sullo stesso
+                // PC). Prima metteva in muto il brano nuovo appena partito: pulsante su
+                // Pausa, barra che avanza, ma niente audio per tutta la canzone.
+                const rt = radioTrackRef.current;
+                const dur = ytPlayerRef.current?.getDuration?.() || 0;
+                if (rt && !rt.isCustom && rt.startedAt && dur > 0 && (Date.now() - rt.startedAt) / 1000 + 20 < dur) return;
                 keepAliveLoopRef.current = true;
                 ytPlayerRef.current?.mute?.();
                 ytPlayerRef.current?.seekTo?.(0, true);
@@ -1426,8 +1436,8 @@ export default function RadioPucciotto() {
         const buf = ctx.createBuffer(1, Math.max(1, Math.floor(ctx.sampleRate / 2)), ctx.sampleRate);
         const src = ctx.createBufferSource();
         const g = ctx.createGain();
-        if (isGestionale) {
-          // GESTIONALE: un buffer di zeri (come prima) è silenzio vero, e il browser lo
+        {
+          // GESTIONALE E ASCOLTATORE: un buffer di zeri (come prima) è silenzio vero, e il browser lo
           // misura come tale: con la scheda in background e senza altro audio (muto
           // generale, volume a zero, player fermo) la considerava "silenziosa" e dopo
           // qualche minuto la CONGELAVA per risparmiare energia. Si fermava tutto,
@@ -1440,8 +1450,9 @@ export default function RadioPucciotto() {
           const data = buf.getChannelData(0);
           for (let i = 0; i < data.length; i++) data[i] = Math.sin((2 * Math.PI * 20 * i) / ctx.sampleRate);
           g.gain.value = 0.001;
-        } else {
-          g.gain.value = 0.0001; // buffer di zeri: basta a tenere vivo il contesto per gli spot
+          // Vale anche per l'ascoltatore: mentre aspetta in muto il brano successivo la
+          // sua scheda era silenziosa, e in background il browser poteva congelarla: il
+          // brano nuovo partiva solo tornando sulla pagina.
         }
         src.buffer = buf;
         src.loop = true;
@@ -1945,6 +1956,18 @@ export default function RadioPucciotto() {
         // loadVideoById avvia sempre la riproduzione; se il browser blocca l'autoplay
         // (mancanza di interazione utente), onStateChange non passerà mai a PLAYING e
         // isPlaying resterà false: l'utente vedrà comunque il tasto Play pronto.
+      } else if (keepAliveLoopRef.current && isPlaying && (ytPlayerRef.current.getDuration?.() || 0) > 0
+        && elapsed + 20 < ytPlayerRef.current.getDuration()) {
+        // RETE DI SICUREZZA: siamo "in attesa muta" del brano successivo, ma secondo il
+        // gestionale a questo brano mancano ancora più di 20 secondi: l'attesa è sbagliata
+        // (es. un "fine brano" arrivato in ritardo). Invece di restare muti per tutta la
+        // canzone, torniamo nel brano al punto giusto e togliamo il muto. Scatta al più
+        // tardi col battito di sincronizzazione del gestionale (ogni 15 secondi).
+        keepAliveLoopRef.current = false;
+        armSuppressPause();
+        ytPlayerRef.current.loadVideoById({ videoId: radioTrack.videoId, startSeconds: elapsed });
+        ytPlayerRef.current.unMute?.();
+        applyMusicVolume();
       } else if (keepAliveLoopRef.current) {
         // Siamo nel loop di attesa MUTO a fine brano: il nostro video è già finito, ma il
         // gestionale sta ancora finendo lo stesso brano e i suoi battiti di posizione

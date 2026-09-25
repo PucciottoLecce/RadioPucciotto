@@ -101,6 +101,16 @@ proprietario **in italiano**, in modo semplice e senza gergo tecnico.
   indiane, russe/ex URSS, asiatiche, arabe, africane, tedesco) e a **descrizione ed
   etichette** (alfabeti non latini, parole chiave). Aggiunte etichette/artisti
   punjabi alle parole chiave. Cache `rp_yt_cache_eu_am_v5`.
+- **PR #13**: ascoltatore bloccato a fine brano (pulsante su Pausa, barra che
+  avanza, niente audio), difetto presente fin dalla versione di partenza e più
+  frequente con radio e gestionale sullo stesso PC. Causa: il "fine brano" (ENDED)
+  del brano VECCHIO arrivava dopo il caricamento del nuovo e lo metteva in muto
+  (loop di attesa). Ora l'ENDED è ignorato se al brano in onda mancano più di 20 s
+  secondo il gestionale; rete di sicurezza: se in attesa muta ma mancano più di
+  20 s, al battito si ricarica il brano al punto giusto senza muto. Il tono
+  anti-congelamento a 20 Hz vale ora anche per l'ascoltatore (in attesa muta la
+  sua scheda veniva congelata in background). La PR #12 (`/gestionale`) è stata
+  chiusa in attesa: il commit `aeac6b3` va ripreso in una nuova PR.
 - **Per tornare indietro:** fare il revert del commit di merge della PR su `main`
   (Cloudflare ripubblica da solo).
 - La chiave della cache della playlist nel browser (`CACHE_KEY`, ora
