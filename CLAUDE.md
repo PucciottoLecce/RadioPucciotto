@@ -75,6 +75,12 @@ proprietario **in italiano**, in modo semplice e senza gergo tecnico.
   anche col Muto generale. La radio degli ascoltatori è invariata (buffer di zeri).
   Rimedio aggiuntivo lato utente: in Chrome/Edge aggiungere il sito a "mantieni
   sempre attivi / non mettere in sospensione".
+- **PR #8**: verificato che a fine spot la musica torni al volume di partenza
+  (9 casi nel gestionale, 10 per gli ascoltatori). Corretti due problemi degli
+  ascoltatori: pausa e ripresa durante uno spot lasciava la musica a metà volume;
+  il passaggio del gestionale da un brano YouTube a un mp3 ("Le mie canzoni") a
+  metà brano fermava gli ascoltatori (il PAUSED di YouTube veniva preso per una
+  pausa loro: ora è ignorato quando in onda c'è un mp3, via `radioTrackRef`).
 - **Per tornare indietro:** fare il revert del commit di merge della PR su `main`
   (Cloudflare ripubblica da solo).
 - La chiave della cache della playlist nel browser (`CACHE_KEY`, ora
