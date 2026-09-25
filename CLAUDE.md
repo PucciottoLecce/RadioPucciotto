@@ -81,6 +81,13 @@ proprietario **in italiano**, in modo semplice e senza gergo tecnico.
   il passaggio del gestionale da un brano YouTube a un mp3 ("Le mie canzoni") a
   metà brano fermava gli ascoltatori (il PAUSED di YouTube veniva preso per una
   pausa loro: ora è ignorato quando in onda c'è un mp3, via `radioTrackRef`).
+- **PR #9**: ogni spot parte dall'inizio e arriva alla fine. Lato ascoltatore,
+  quando il gestionale chiude lo spot (`adPlaying` = null) uno spot che qui sta
+  ancora suonando o partendo NON viene più tagliato: finisce da solo (rete di
+  sicurezza 20 s). Prima si perdeva la coda (ascoltatore in ritardo) o quasi tutto
+  lo spot (chi apriva la radio a spot iniziato). Il primo tocco sulla pagina
+  (`unlockAdAudio`) non cambia più la sorgente dell'`<audio>` degli spot se sta
+  suonando. Verificato in 9 casi (Web Audio, `<audio>`, gestionale).
 - **Per tornare indietro:** fare il revert del commit di merge della PR su `main`
   (Cloudflare ripubblica da solo).
 - La chiave della cache della playlist nel browser (`CACHE_KEY`, ora
