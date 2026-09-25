@@ -477,7 +477,7 @@ export default function RadioPucciotto() {
 
     // Chiave nuova: la cache vecchia conteneva la playlist globale per generi (con i
     // brani indiani/russi ecc.) e non deve essere riusata.
-    const CACHE_KEY = "rp_yt_cache_eu_am_v4"; // v4: solo brani riproducibili in Italia, niente Germania
+    const CACHE_KEY = "rp_yt_cache_eu_am_v5"; // v5: esclusi anche dalla lingua dell'audio/descrizione (es. punjabi in GB)
     // Alzata da 4 a 18 ore: con la chiave condivisa tra tutti i visitatori, ogni
     // scadenza cache moltiplicata per tanti browser è proprio ciò che genera le
     // raffiche che fanno scattare rateLimitExceeded (vedi anche il fix sotto sullo
@@ -552,30 +552,12 @@ export default function RadioPucciotto() {
 
     // Filtro di sicurezza sui risultati (ora \u00E8 solo una rete di riserva: le fonti sono
     // gi\u00E0 europee) + conversione nel formato brano della radio.
-    const toTracks = (items, label, getVideoId) => {
           // Blocca i titoli/canali scritti in alfabeti non latini: cirillico (russo ecc.),
           // armeno, georgiano, ebraico, indiani (devanagari,
           // bengali, gurmukhi, gujarati, oriya, tamil, telugu, kannada, malayalam,
           // singalese), sud-est asiatico (thai, lao, khmer, birmano), Asia orientale
           // (CJK, hangul, kana), arabo (con forme di presentazione) ed etiope.
           const hasNonLatin = (str) => /[\u0400-\u052F\u0530-\u058F\u0590-\u05FF\u10A0-\u10FF\u0600-\u06FF\u0750-\u077F\u0900-\u097F\u0980-\u09FF\u0A00-\u0A7F\u0A80-\u0AFF\u0B00-\u0B7F\u0B80-\u0BFF\u0C00-\u0C7F\u0C80-\u0CFF\u0D00-\u0D7F\u0D80-\u0DFF\u0E00-\u0E7F\u0E80-\u0EFF\u0F00-\u0FFF\u1000-\u109F\u1100-\u11FF\u1200-\u137F\u1780-\u17FF\u3000-\u9FFF\uA000-\uA48F\uAC00-\uD7AF\uF900-\uFAFF\uFB50-\uFDFF\uFE70-\uFEFF\u3400-\u4DBF]/.test(str);
-          const isSpam = (title) => {
-            if (title.length > 80) return true;
-            const t = title.toLowerCase();
-            return (
-              /\bfeat\.?.*feat\.?\b/.test(t) ||
-              /\b(subscribe|follow|like|download|stream|out now|available now|new song|new video|latest|lyric video|lyrics video|audio only|visualizer|topic)\b/.test(t) ||
-              /\b(nonstop|non stop|jukebox|playlist|mashup|medley|mixtape|compilation|top \d+)\b/.test(t) ||
-              /\b(full album|full movie|episode|trailer|teaser|bts|behind the scene)\b/.test(t) ||
-              /\b(how to|tutorial|lesson|corso|come si|come fare|come registrare|come suonare|beginner|imparare|budget|low cost|cheap)\b/.test(t) ||
-              /^(come|how|tutorial|lezione|guida|recensione|review|unboxing)\b/.test(t) ||
-              // Spot pubblicitari / presentazioni che si infilano tra i risultati musicali:
-              /\b(spot pubblicitario|pubblicit[aà]|presentazione aziendale|presentazione ufficiale|commercial|advertisement|advert|promo video|company profile|corporate video|jingle|sigla)\b/.test(t) ||
-              (title.match(/#\w+/g) || []).length >= 2 ||
-              (title.match(/[|•·—–]/g) || []).length >= 2 ||
-              /\d{4}.*\d{4}/.test(t)
-            );
-          };
           // Titoli/canali di musica indiana, asiatica o africana spesso traslitterati in
           // caratteri latini (quindi invisibili a hasNonLatin, che guarda solo
           // l'alfabeto): li intercettiamo per parole chiave esplicite, a parola intera
@@ -600,6 +582,11 @@ export default function RadioPucciotto() {
             // ricerche "di sempre" sugli Stati Uniti, dove i titoli sono spesso in inglese.
             "t-series", "tseries", "zee music", "saregama", "sony music india",
             "speed records", "tips official", "yrf", "aditya music", "lahari", "shemaroo",
+            // Musica punjabi, molto ascoltata nel Regno Unito: entra dalla classifica
+            // "Internazionali" (GB) con titoli in inglese e senza parole rivelatrici.
+            "white hill", "geet mp3", "jass records", "desi melodies", "saga music",
+            "humble music", "times music", "tips punjabi", "vyrl", "rehaan records",
+            "brown boys", "sidhu moose wala", "ap dhillon", "karan aujla", "diljit dosanjh",
             // Russia / area ex sovietica (titoli traslitterati in caratteri latini)
             "russian", "russkaya", "russkie", "pesni",
             // Africa
@@ -610,6 +597,24 @@ export default function RadioPucciotto() {
             "azonto", "african song", "african music", "afro pop", "afropop",
           ].join("|") + ")\\b");
           const isForeignLatin = (str) => FOREIGN_KEYWORDS.test(str.toLowerCase());
+    const toTracks = (items, label, getVideoId) => {
+          const isSpam = (title) => {
+            if (title.length > 80) return true;
+            const t = title.toLowerCase();
+            return (
+              /\bfeat\.?.*feat\.?\b/.test(t) ||
+              /\b(subscribe|follow|like|download|stream|out now|available now|new song|new video|latest|lyric video|lyrics video|audio only|visualizer|topic)\b/.test(t) ||
+              /\b(nonstop|non stop|jukebox|playlist|mashup|medley|mixtape|compilation|top \d+)\b/.test(t) ||
+              /\b(full album|full movie|episode|trailer|teaser|bts|behind the scene)\b/.test(t) ||
+              /\b(how to|tutorial|lesson|corso|come si|come fare|come registrare|come suonare|beginner|imparare|budget|low cost|cheap)\b/.test(t) ||
+              /^(come|how|tutorial|lezione|guida|recensione|review|unboxing)\b/.test(t) ||
+              // Spot pubblicitari / presentazioni che si infilano tra i risultati musicali:
+              /\b(spot pubblicitario|pubblicit[aà]|presentazione aziendale|presentazione ufficiale|commercial|advertisement|advert|promo video|company profile|corporate video|jingle|sigla)\b/.test(t) ||
+              (title.match(/#\w+/g) || []).length >= 2 ||
+              (title.match(/[|•·—–]/g) || []).length >= 2 ||
+              /\d{4}.*\d{4}/.test(t)
+            );
+          };
           return (items || [])
             .filter((it) => {
               const title = it.snippet.title;
@@ -689,15 +694,36 @@ export default function RadioPucciotto() {
       if (rr?.blocked && rr.blocked.includes(PLAY_REGION)) return false;
       return true;
     };
+    // Lingue dell'audio dichiarate da YouTube che non vogliamo: indiane, russe/ex URSS,
+    // asiatiche, arabe/mediorientali, africane e tedesco (scelta del proprietario).
+    const BLOCKED_LANGS = new Set([
+      "hi", "pa", "ta", "te", "ml", "kn", "mr", "bn", "gu", "ur", "ne", "si", "or", "as", "bho", "sa",
+      "ru", "uk", "be", "kk", "uz", "ky", "tg", "az",
+      "ko", "ja", "zh", "th", "vi", "id", "ms", "tl", "fil", "km", "lo", "my", "mn",
+      "ar", "fa", "tr", "ps", "ku", "he",
+      "am", "sw", "yo", "ig", "ha", "zu", "xh",
+      "de",
+    ]);
+    // Brani "stranieri" che hanno titolo e canale in caratteri latini e senza parole
+    // rivelatrici (tipico della musica punjabi nella classifica del Regno Unito): li
+    // riconosciamo dalla lingua dell'audio dichiarata su YouTube, e dalla descrizione e
+    // dalle etichette del video, dove di solito compaiono testi in alfabeto indiano o
+    // parole come "Punjabi song".
+    const isForeignByDetails = (v) => {
+      const lang = String(v.snippet?.defaultAudioLanguage || v.snippet?.defaultLanguage || "").toLowerCase().split("-")[0];
+      if (BLOCKED_LANGS.has(lang)) return true;
+      const text = [v.snippet?.description || "", ...(v.snippet?.tags || [])].join(" ");
+      return hasNonLatin(text) || isForeignLatin(text);
+    };
     const keepPlayable = (list) => {
       const chunks = [];
       for (let i = 0; i < list.length; i += 50) chunks.push(list.slice(i, i + 50));
       return Promise.all(chunks.map((chunk) => {
         const ids = chunk.map((t) => t.videoId).join(",");
-        const url = `https://www.googleapis.com/youtube/v3/videos?part=status,contentDetails&id=${ids}&maxResults=50&key=${YOUTUBE_API_KEY}`;
+        const url = `https://www.googleapis.com/youtube/v3/videos?part=snippet,status,contentDetails&id=${ids}&maxResults=50&key=${YOUTUBE_API_KEY}`;
         return fetchJsonWithRetry(url, "verifica")
           .then((data) => {
-            const okIds = new Set((data.items || []).filter(isPlayableHere).map((v) => v.id));
+            const okIds = new Set((data.items || []).filter((v) => isPlayableHere(v) && !isForeignByDetails(v)).map((v) => v.id));
             // Un id che non torna proprio nella risposta è un video rimosso/privato.
             return chunk.filter((t) => okIds.has(t.videoId));
           })

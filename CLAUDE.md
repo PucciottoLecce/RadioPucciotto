@@ -88,10 +88,17 @@ proprietario **in italiano**, in modo semplice e senza gergo tecnico.
   lo spot (chi apriva la radio a spot iniziato). Il primo tocco sulla pagina
   (`unlockAdAudio`) non cambia più la sorgente dell'`<audio>` degli spot se sta
   suonando. Verificato in 9 casi (Web Audio, `<audio>`, gestionale).
+- **PR #10**: canzoni indiane (punjabi) ancora presenti in "Internazionali" (la
+  classifica GB ne è piena, con titoli in inglese). La verifica finale
+  (`keepPlayable`, `videos.list part=snippet,status,contentDetails`, stessa quota)
+  scarta anche in base alla **lingua dell'audio** dichiarata (`BLOCKED_LANGS`:
+  indiane, russe/ex URSS, asiatiche, arabe, africane, tedesco) e a **descrizione ed
+  etichette** (alfabeti non latini, parole chiave). Aggiunte etichette/artisti
+  punjabi alle parole chiave. Cache `rp_yt_cache_eu_am_v5`.
 - **Per tornare indietro:** fare il revert del commit di merge della PR su `main`
   (Cloudflare ripubblica da solo).
 - La chiave della cache della playlist nel browser (`CACHE_KEY`, ora
-  `rp_yt_cache_eu_am_v4`) va cambiata ogni volta che cambiano fonti o filtri,
+  `rp_yt_cache_eu_am_v5`) va cambiata ogni volta che cambiano fonti o filtri,
   altrimenti la vecchia playlist resta per 18 ore.
 
 ## Punti ancora aperti
