@@ -812,8 +812,16 @@ export default function RadioPucciotto() {
               }
             }
             if (e.data === window.YT.PlayerState.PLAYING) {
-              suppressPauseRef.current = false; // arrivato un PLAYING vero: la transizione è conclusa
-              if (suppressPauseTimeoutRef.current) { clearTimeout(suppressPauseTimeoutRef.current); suppressPauseTimeoutRef.current = null; }
+              // Arrivato un PLAYING vero: la transizione è conclusa. MA solo se il brano è
+              // davvero caricato (durata > 0): durante un cambio brano YouTube può mandare in
+              // ritardo un "in riproduzione" del comando precedente, con durata 0. Prima questo
+              // bastava ad abbassare la guardia, e la PAUSA tecnica del cambio video subito
+              // dopo veniva presa per una pausa vera: la radio restava ferma con ▶ per tutta la
+              // canzone (visto nel registro reale: fine brano e brano nuovo a 32 ms di distanza).
+              if ((ytPlayerRef.current?.getDuration?.() || 0) > 0) {
+                suppressPauseRef.current = false;
+                if (suppressPauseTimeoutRef.current) { clearTimeout(suppressPauseTimeoutRef.current); suppressPauseTimeoutRef.current = null; }
+              }
               if (keepAliveLoopRef.current) {
                 // NON consumiamo il flag: resta attivo per TUTTA l'attesa del brano
                 // successivo (viene azzerato solo dall'effetto radioTrack quando il brano
@@ -853,6 +861,10 @@ export default function RadioPucciotto() {
                 // stutter "a spezzoni". Al ritorno in primo piano ci pensa il gestore di
                 // visibilitychange a riprendere; per un buffering, YouTube riparte da solo.
                 if (!isPlayingRef.current) setStatus("In pausa");
+              } else if (!((ytPlayerRef.current?.getDuration?.() || 0) > 0)) {
+                // Pausa di un brano non ancora caricato (durata 0): è la pausa tecnica di
+                // YouTube durante il cambio video, non una pausa vera. Ignorata.
+                rlog("PAUSA di YouTube ignorata (brano non ancora caricato)");
               } else if (radioTrackRef.current?.isCustom) {
                 rlog("PAUSA di YouTube ignorata (in onda un mp3)");
                 // In onda c'è un brano mp3 ("Le mie canzoni"): YouTube non è il player

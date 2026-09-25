@@ -142,8 +142,16 @@ proprietario **in italiano**, in modo semplice e senza gergo tecnico.
   scheda visibile/nascosta, collegamento al database. Nessun cambio di comportamento.
   Si legge da `/?log` (`src/Registro.jsx`, pulsante Copia) sullo stesso browser.
   Serve a diagnosticare dal vero: (a) ascoltatore fermo con ▶ e 0:00/0:00 al brano
-  nuovo (il brano non parte da solo, si sblocca col Play); (b) brano che si
-  interrompe e passa al successivo. Prima di correggere questi due, leggere il registro.
+  nuovo → diagnosticato e corretto nella PR #18; (b) brano che si interrompe e passa
+  al successivo → non ancora catturato nel registro. Prima di correggere, leggere il registro.
+- **PR #18** (prima correzione basata sul registro vero): radio ferma con ▶ e 0:00 per
+  tutta una canzone, poi ripartenza da sola al brano successivo. Registro reale
+  20:00:27: FINITO del brano A, 32 ms dopo arriva il brano B; YouTube manda in ritardo
+  un "IN RIPRODUZIONE" con durata 0 (risposta al loop di attesa), che azzerava la
+  protezione `suppressPauseRef`; la PAUSA tecnica del cambio video subito dopo veniva
+  presa per vera → `setIsPlaying(false)`. Ora: la protezione si toglie solo con un
+  PLAYING a durata > 0, e una PAUSA con durata 0 (brano non caricato) è ignorata.
+  Prova `test-reg2000` riproduce la sequenza: fallisce prima, passa dopo.
 - **Per tornare indietro:** fare il revert del commit di merge della PR su `main`
   (Cloudflare ripubblica da solo).
 - La chiave della cache della playlist nel browser (`CACHE_KEY`, ora
