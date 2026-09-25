@@ -1,0 +1,38 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+
+    "nowPlaying": {
+      ".read": true,
+      ".write": "auth != null && auth.uid === 'rQuRDBStbaMqbtUyLmP9634VSZT2'",
+      ".validate": "newData.hasChildren(['title', 'startedAt'])",
+      "videoId":   { ".validate": "newData.isString() && newData.val().matches(/^[A-Za-z0-9_-]{11}$/)" },
+      "url":       { ".validate": "newData.isString() && newData.val().beginsWith('/my-song/') && newData.val().length <= 200" },
+      "title":     { ".validate": "newData.isString() && newData.val().length <= 300" },
+      "artist":    { ".validate": "newData.isString() && newData.val().length <= 200" },
+      "category":  { ".validate": "newData.isString() && newData.val().length <= 100" },
+      "color":     { ".validate": "newData.isString() && newData.val().length <= 30" },
+      "isCustom":  { ".validate": "newData.isBoolean()" },
+      "startedAt": { ".validate": "newData.isNumber()" },
+      "$altro":    { ".validate": false }
+    },
+
+    "adPlaying": {
+      ".read": true,
+      ".write": "auth != null && auth.uid === 'rQuRDBStbaMqbtUyLmP9634VSZT2'",
+      ".validate": "newData.hasChildren(['url', 'startedAt'])",
+      "url":       { ".validate": "newData.isString() && newData.val().beginsWith('/ads/') && newData.val().length <= 200" },
+      "startedAt": { ".validate": "newData.isNumber()" },
+      "$altro":    { ".validate": false }
+    },
+
+    "settings": {
+      "adVolume": {
+        ".read": true,
+        ".write": "auth != null && auth.uid === 'rQuRDBStbaMqbtUyLmP9634VSZT2'",
+        ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 1"
+      }
+    }
+  }
+}

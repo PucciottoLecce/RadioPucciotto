@@ -125,6 +125,16 @@ proprietario **in italiano**, in modo semplice e senza gergo tecnico.
   dal gestionale. Si resta collegati (persistenza locale del browser); pulsante
   "Esci" in basso a destra. Le regole del database NON sono ancora attive: passo
   successivo, solo dopo aver verificato il login dal vero.
+- **PR #16**: `database.rules.json` = regole del Realtime Database (lettura pubblica
+  di `nowPlaying`, `adPlaying`, `settings/adVolume`; scrittura solo per
+  `OWNER_UID`; validazione di ogni campo: videoId di 11 caratteri, mp3 solo da
+  `/my-song/`, spot solo da `/ads/`, volume 0–1, nessun campo sconosciuto; tutto il
+  resto chiuso). NON si pubblicano da sole: vanno incollate a mano in Console
+  Firebase → Realtime Database → Regole. Verificate con l'emulatore ufficiale
+  (jar `firebase-database-emulator`, 26 casi via REST con token finti in `?auth=`)
+  e con il codice vero dell'app collegato all'emulatore (`connectDatabaseEmulator`
+  con `mockUserToken`). Se si aggiunge un campo a `publishNowPlaying` o un nuovo
+  nodo, aggiornare anche le regole, altrimenti il database rifiuta la scrittura.
 - **Per tornare indietro:** fare il revert del commit di merge della PR su `main`
   (Cloudflare ripubblica da solo).
 - La chiave della cache della playlist nel browser (`CACHE_KEY`, ora
@@ -140,7 +150,8 @@ proprietario **in italiano**, in modo semplice e senza gergo tecnico.
   `rQuRDBStbaMqbtUyLmP9634VSZT2` (utente Firebase già creato), con validazione dei
   dati. Le regole vanno messe SOLO dopo che il login è online e verificato,
   altrimenti il gestionale non può più trasmettere. Stato: (1) Cloudflare Access
-  attivo e verificato dal proprietario; (2) login nella PR #15; (3) da fare.
+  attivo e verificato dal proprietario; (2) login online e verificato (PR #15);
+  (3) regole pronte in `database.rules.json` (PR #16), da incollare in Firebase.
 
 - **Sicurezza** (serve il proprietario): chiunque aggiunga `?gestionale`
   all'indirizzo può trasmettere; Firebase non ha login. La chiave YouTube va
