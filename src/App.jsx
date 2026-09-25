@@ -1462,10 +1462,6 @@ export default function RadioPucciotto() {
     if (adAudioUnlockedRef.current || !adAudioRef.current) return;
     adAudioUnlockedRef.current = true;
     const a = adAudioRef.current;
-    // Sta già suonando (uno spot partito da solo): è già "sbloccato". Cambiarne la
-    // sorgente qui sotto lo interromperebbe a metà: era ciò che succedeva se il primo
-    // tocco sulla pagina capitava proprio durante uno spot.
-    if (!a.paused) return;
     const wasMuted = a.muted;
     // IMPORTANTE: il tag <audio> degli spot potrebbe non avere ancora una src reale.
     // Chiamare play() senza sorgente fallisce subito (nessun contenuto da riprodurre) e
@@ -1696,12 +1692,6 @@ export default function RadioPucciotto() {
   // riattiva mentre su Firebase c'è ancora lo stesso spot (il null di fine non è ancora
   // arrivato), questo evita di rimetterlo in play e di ri-abbassare la musica.
   const finishedAdKeyRef = useRef(null);
-  // Spot dell'ascoltatore in fase di avvio (caricamento/decodifica) e timer di sicurezza
-  // per la "coda" dello spot dopo che il gestionale lo ha già chiuso (vedi sotto).
-  const spotStartingRef = useRef(false);
-  const spotTailTimerRef = useRef(null);
-  const adTrackRef = useRef(null);
-  adTrackRef.current = adTrack;
   useEffect(() => {
     if (isGestionale) return;
     const adPlayingRef = ref(db, "adPlaying");
@@ -1738,7 +1728,6 @@ export default function RadioPucciotto() {
       // aveva ancora "in onda", la musica ripartiva abbassata a metà volume (e restava
       // così finché il gestionale non chiudeva lo spot).
       if (adTrack?.url && lastStartedAdKeyRef.current) finishedAdKeyRef.current = lastStartedAdKeyRef.current;
-      spotStartingRef.current = false;
       stopEverything();
       isDuckingRef.current = false;
       applyMusicVolume();
@@ -1779,9 +1768,8 @@ export default function RadioPucciotto() {
       // PRIMA scelta: Web Audio (suona anche a scheda in background, niente "power saving"
       // che lo mette in pausa). Se non è possibile (browser vecchio, contesto non attivo,
       // decodifica fallita), FALLBACK al tag <audio>.
-      spotStartingRef.current = true;
       playSpotWA(adTrack.url, vol, onEnd).then((ok) => {
-        if (ok || !spotAudio) { spotStartingRef.current = false; return; }
+        if (ok || !spotAudio) return;
         if (spotAudio.src !== new URL(adTrack.url, window.location.href).href) {
           spotAudio.src = adTrack.url;
           spotAudio.load();
@@ -1798,7 +1786,6 @@ export default function RadioPucciotto() {
         const startOnce = () => {
           if (started) return;
           started = true;
-          spotStartingRef.current = false;
           spotAudio.play().catch((e) => console.warn("Spot bloccato:", e.message));
         };
         if (spotAudio.readyState >= 4) startOnce();
@@ -1810,27 +1797,6 @@ export default function RadioPucciotto() {
         }
       });
     } else {
-      // Il gestionale ha chiuso lo spot. Se QUI sta ancora suonando (o sta partendo), NON
-      // lo tagliamo: l'ascoltatore lo fa sempre partire un po' dopo il gestionale (rete,
-      // caricamento del file), e chi apre la radio a spot iniziato lo sente da capo.
-      // Prima veniva fermato di colpo: si perdeva la coda, o quasi tutto lo spot. Lo
-      // lasciamo finire: a fine spot la musica torna su da sola (onEnd / evento "ended").
-      // Rete di sicurezza: se entro 20 secondi non è ancora finito, lo chiudiamo noi.
-      const spotStillPlaying = spotStartingRef.current || !!spotSourceRef.current
-        || (!!spotAudio && !spotAudio.paused && !spotAudio.muted && String(spotAudio.src).includes("/ads/"));
-      if (spotStillPlaying) {
-        if (!spotTailTimerRef.current) {
-          spotTailTimerRef.current = setTimeout(() => {
-            spotTailTimerRef.current = null;
-            if (adTrackRef.current) return; // nel frattempo è arrivato un altro spot
-            spotStartingRef.current = false;
-            stopEverything();
-            isDuckingRef.current = false;
-            applyMusicVolume();
-          }, 20000);
-        }
-        return;
-      }
       lastStartedAdKeyRef.current = null;
       finishedAdKeyRef.current = null;
       stopEverything();
