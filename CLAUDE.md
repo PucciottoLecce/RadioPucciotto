@@ -118,6 +118,13 @@ proprietario **in italiano**, in modo semplice e senza gergo tecnico.
   anti-congelamento a 20 Hz vale ora anche per l'ascoltatore (in attesa muta la
   sua scheda veniva congelata in background). La PR #12 (`/gestionale`) è stata
   chiusa in attesa e ripresa nella PR #14.
+- **PR #15**: login del gestionale (Firebase Auth, email + password). `src/main.jsx`
+  monta `AccessoGestionale` solo su `/gestionale`; il gestionale (`App`) viene
+  montato solo dopo l'accesso con l'account `OWNER_UID` (in `src/firebase.js`,
+  insieme al `firebaseConfig` completo). `firebase/auth` è caricato a parte, solo
+  dal gestionale. Si resta collegati (persistenza locale del browser); pulsante
+  "Esci" in basso a destra. Le regole del database NON sono ancora attive: passo
+  successivo, solo dopo aver verificato il login dal vero.
 - **Per tornare indietro:** fare il revert del commit di merge della PR su `main`
   (Cloudflare ripubblica da solo).
 - La chiave della cache della playlist nel browser (`CACHE_KEY`, ora
@@ -132,8 +139,8 @@ proprietario **in italiano**, in modo semplice e senza gergo tecnico.
   Database: lettura pubblica, scrittura solo per l'UID del proprietario
   `rQuRDBStbaMqbtUyLmP9634VSZT2` (utente Firebase già creato), con validazione dei
   dati. Le regole vanno messe SOLO dopo che il login è online e verificato,
-  altrimenti il gestionale non può più trasmettere. Serve ancora il `firebaseConfig`
-  dell'app Web (apiKey, authDomain, projectId, appId: non segreti).
+  altrimenti il gestionale non può più trasmettere. Stato: (1) Cloudflare Access
+  attivo e verificato dal proprietario; (2) login nella PR #15; (3) da fare.
 
 - **Sicurezza** (serve il proprietario): chiunque aggiunga `?gestionale`
   all'indirizzo può trasmettere; Firebase non ha login. La chiave YouTube va
