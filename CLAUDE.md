@@ -135,6 +135,15 @@ proprietario **in italiano**, in modo semplice e senza gergo tecnico.
   e con il codice vero dell'app collegato all'emulatore (`connectDatabaseEmulator`
   con `mockUserToken`). Se si aggiunge un campo a `publishNowPlaying` o un nuovo
   nodo, aggiornare anche le regole, altrimenti il database rifiuta la scrittura.
+- **PR #17**: "scatola nera" (`src/registro.js`, `rlog(...)`): annota in localStorage
+  (ultime 1500 righe, chiavi `rp_log_radio` / `rp_log_gestionale`) stati del player
+  YouTube, diretta e spot ricevuti, decisioni (attesa muta, FINITO ignorato, rete di
+  sicurezza, pause), errori YouTube, cambi brano e pubblicazioni del gestionale,
+  scheda visibile/nascosta, collegamento al database. Nessun cambio di comportamento.
+  Si legge da `/?log` (`src/Registro.jsx`, pulsante Copia) sullo stesso browser.
+  Serve a diagnosticare dal vero: (a) ascoltatore fermo con ▶ e 0:00/0:00 al brano
+  nuovo (il brano non parte da solo, si sblocca col Play); (b) brano che si
+  interrompe e passa al successivo. Prima di correggere questi due, leggere il registro.
 - **Per tornare indietro:** fare il revert del commit di merge della PR su `main`
   (Cloudflare ripubblica da solo).
 - La chiave della cache della playlist nel browser (`CACHE_KEY`, ora
