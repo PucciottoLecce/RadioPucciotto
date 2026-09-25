@@ -151,12 +151,13 @@ proprietario **in italiano**, in modo semplice e senza gergo tecnico.
   dati. Le regole vanno messe SOLO dopo che il login è online e verificato,
   altrimenti il gestionale non può più trasmettere. Stato: (1) Cloudflare Access
   attivo e verificato dal proprietario; (2) login online e verificato (PR #15);
-  (3) regole pronte in `database.rules.json` (PR #16), da incollare in Firebase.
+  (3) regole di `database.rules.json` (PR #16) PUBBLICATE in Firebase dal
+  proprietario e verificate (trasmissione ok). Regole precedenti (backup):
+  `nowPlaying`, `adPlaying`, `settings` con `.read` e `.write` a `true`.
 
-- **Sicurezza** (serve il proprietario): chiunque aggiunga `?gestionale`
-  all'indirizzo può trasmettere; Firebase non ha login. La chiave YouTube va
-  limitata al dominio del sito (Google Cloud Console → Credenziali → Referrer HTTP).
-  Una protezione vera richiede login Firebase + regole del database.
+- **Sicurezza, resta solo:** limitare la chiave YouTube al dominio del sito
+  (Google Cloud Console → Credenziali → Referrer HTTP `https://radio.pucciotto.it/*`)
+  e alla sola "YouTube Data API v3".
 - Una categoria con un solo brano si ferma a fine canzone (oggi non succede:
   tutte le categorie hanno molti brani).
 - Codice non usato: `FALLBACK_TRACKS`, `removeCustomTrack`/`isBlob`.
