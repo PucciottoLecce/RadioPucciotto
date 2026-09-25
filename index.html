@@ -18,6 +18,15 @@
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
 
     <title>Radio Pucciotto</title>
+
+    <!-- Vecchio indirizzo del gestionale (/?gestionale): si viene mandati subito su
+         /gestionale, l'indirizzo protetto da Cloudflare Access (codice via email).
+         Così i vecchi segnalibri funzionano, ma senza aprire una "porta sul retro". -->
+    <script>
+      if (/[?&]gestionale(=|&|$)/.test(window.location.search) && window.location.pathname.replace(/\/+$/, "") !== "/gestionale") {
+        window.location.replace("/gestionale");
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>
