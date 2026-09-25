@@ -225,6 +225,10 @@ export default function RadioPucciotto() {
 
   // Traccia trasmessa dal gestionale via Firebase — è la fonte di verità per la vista pubblica
   const [radioTrack, setRadioTrack] = useState(null);
+  // Sempre aggiornato su radioTrack: serve al gestore degli eventi del player YouTube
+  // (creato una volta sola) per sapere se in onda c'è un brano mp3 (vedi PAUSED sotto).
+  const radioTrackRef = useRef(null);
+  radioTrackRef.current = radioTrack;
 
   // Spot pubblicitario in onda in questo momento, sincronizzato via Firebase (vista pubblica)
   const [adTrack, setAdTrack] = useState(null);
@@ -802,6 +806,12 @@ export default function RadioPucciotto() {
                 // stutter "a spezzoni". Al ritorno in primo piano ci pensa il gestore di
                 // visibilitychange a riprendere; per un buffering, YouTube riparte da solo.
                 if (!isPlayingRef.current) setStatus("In pausa");
+              } else if (radioTrackRef.current?.isCustom) {
+                // In onda c'è un brano mp3 ("Le mie canzoni"): YouTube non è il player
+                // attivo, e questo PAUSED è solo la conseguenza del pauseVideo() con cui lo
+                // fermiamo al passaggio YouTube → mp3. Prima veniva preso per una pausa
+                // dell'ascoltatore: se il gestionale passava a "Giulia" a metà di un brano
+                // YouTube, la radio si fermava e l'ascoltatore doveva ripremere Play.
               } else {
                 setStatus("In pausa");
                 setIsPlaying(false);
@@ -1687,6 +1697,11 @@ export default function RadioPucciotto() {
 
     // Ascoltatore in pausa: niente spot, e la musica non va abbassata.
     if (!isPlaying) {
+      // Lo spot eventualmente in corso viene interrotto: per questo ascoltatore è
+      // CONCLUSO. Senza segnarlo, quando riprendeva l'ascolto mentre il gestionale lo
+      // aveva ancora "in onda", la musica ripartiva abbassata a metà volume (e restava
+      // così finché il gestionale non chiudeva lo spot).
+      if (adTrack?.url && lastStartedAdKeyRef.current) finishedAdKeyRef.current = lastStartedAdKeyRef.current;
       stopEverything();
       isDuckingRef.current = false;
       applyMusicVolume();
