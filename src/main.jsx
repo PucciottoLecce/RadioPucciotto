@@ -2,6 +2,7 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import App from './App.jsx'
 import AccessoGestionale from './AccessoGestionale.jsx'
+import Registro from './Registro.jsx'
 import './index.css'
 
 // Il gestionale (/gestionale) si apre solo dopo l'accesso; la radio degli ascoltatori no.
@@ -10,6 +11,8 @@ const isGestionale = window.location.pathname.replace(/\/+$/, "") === "/gestiona
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
-    {isGestionale ? <AccessoGestionale><App /></AccessoGestionale> : <App />}
+    {isGestionale ? <AccessoGestionale><App /></AccessoGestionale>
+      : /[?&]log(=|&|$)/.test(window.location.search) ? <Registro />
+      : <App />}
   </React.StrictMode>,
 )

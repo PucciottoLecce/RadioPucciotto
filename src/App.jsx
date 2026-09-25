@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect, useMemo } from "react";
 import { Play, Pause, SkipForward, SkipBack, Volume2, VolumeX, Trash2, Shuffle, Music, Check } from "lucide-react";
 import { db } from "./firebase.js";
+import { rlog } from "./registro.js";
 import { ref, set, get, onValue, onDisconnect } from "firebase/database";
 
 const RED   = "#c0392b";
@@ -775,6 +776,12 @@ export default function RadioPucciotto() {
         events: {
           onReady: () => { ytPlayerRef.current.setVolume(volume * 100); setYtReady(true); },
           onStateChange: (e) => {
+            try {
+              const pl = ytPlayerRef.current;
+              rlog("YT stato", { 1: "IN RIPRODUZIONE", 2: "PAUSA", 0: "FINITO", 3: "CARICAMENTO", 5: "PRONTO", "-1": "NON AVVIATO" }[e.data] || e.data,
+                { video: pl?.getVideoData?.()?.video_id, t: Math.round(pl?.getCurrentTime?.() || 0), durata: Math.round(pl?.getDuration?.() || 0),
+                  attesaMuta: keepAliveLoopRef.current, ignoraPausa: suppressPauseRef.current, inPlay: isPlayingRef.current });
+            } catch (_) {}
             // goNext() (avanzamento al brano successivo) deve girare SOLO nel gestionale:
             // in vista pubblica l'avanzamento è governato da Firebase, non dalla fine del
             // video locale, altrimenti si disallineerebbe la trasmissione.
@@ -796,7 +803,8 @@ export default function RadioPucciotto() {
                 // Pausa, barra che avanza, ma niente audio per tutta la canzone.
                 const rt = radioTrackRef.current;
                 const dur = ytPlayerRef.current?.getDuration?.() || 0;
-                if (rt && !rt.isCustom && rt.startedAt && dur > 0 && (Date.now() - rt.startedAt) / 1000 + 20 < dur) return;
+                if (rt && !rt.isCustom && rt.startedAt && dur > 0 && (Date.now() - rt.startedAt) / 1000 + 20 < dur) { rlog("FINITO ignorato: al brano in onda mancano ancora più di 20s"); return; }
+                rlog("FINITO: entro in attesa muta del brano successivo");
                 keepAliveLoopRef.current = true;
                 ytPlayerRef.current?.mute?.();
                 ytPlayerRef.current?.seekTo?.(0, true);
@@ -846,12 +854,14 @@ export default function RadioPucciotto() {
                 // visibilitychange a riprendere; per un buffering, YouTube riparte da solo.
                 if (!isPlayingRef.current) setStatus("In pausa");
               } else if (radioTrackRef.current?.isCustom) {
+                rlog("PAUSA di YouTube ignorata (in onda un mp3)");
                 // In onda c'è un brano mp3 ("Le mie canzoni"): YouTube non è il player
                 // attivo, e questo PAUSED è solo la conseguenza del pauseVideo() con cui lo
                 // fermiamo al passaggio YouTube → mp3. Prima veniva preso per una pausa
                 // dell'ascoltatore: se il gestionale passava a "Giulia" a metà di un brano
                 // YouTube, la radio si fermava e l'ascoltatore doveva ripremere Play.
               } else {
+                rlog("PAUSA di YouTube -> la radio si mette in pausa");
                 setStatus("In pausa");
                 setIsPlaying(false);
               }
@@ -864,6 +874,7 @@ export default function RadioPucciotto() {
           // raffica, senza mai suonare né sul gestionale né sulla radio ("non segue
           // l'ordine, si ferma e ricomincia, non si sente nulla").
           onError: (e) => {
+            rlog("YT ERRORE", e.data, { video: ytPlayerRef.current?.getVideoData?.()?.video_id });
             if (!isGestionale) return;
             const now = Date.now();
             // Errori entro 12s l'uno dall'altro = "raffica": li contiamo. Errori isolati
@@ -871,6 +882,7 @@ export default function RadioPucciotto() {
             ytErrorCountRef.current = (now - ytLastErrorAtRef.current < 12000) ? ytErrorCountRef.current + 1 : 1;
             ytLastErrorAtRef.current = now;
             if (ytErrorCountRef.current > 5) {
+              rlog("gestionale: troppi errori di fila, riprovo tra 30s");
               // Troppi brani non incorporabili di fila: invece di raffichare facciamo una
               // pausa di 30 secondi e poi riproviamo col successivo. Prima qui la radio si
               // FERMAVA del tutto (isPlaying=false) e restava ferma finché qualcuno non
@@ -908,6 +920,16 @@ export default function RadioPucciotto() {
   }, [tracks, customTracks]);
 
   useEffect(() => { setCurrentIndex(0); }, [category]);
+
+  // Scatola nera: annota play/pausa, scheda visibile/nascosta e collegamento al database.
+  useEffect(() => { rlog(isGestionale ? "gestionale:" : "radio:", isPlaying ? "IN PLAY" : "IN PAUSA"); }, [isPlaying, isGestionale]);
+  useEffect(() => {
+    rlog("pagina aperta", isGestionale ? "(gestionale)" : "(radio)");
+    const onVis = () => rlog("scheda", document.visibilityState === "visible" ? "VISIBILE" : "NASCOSTA");
+    document.addEventListener("visibilitychange", onVis);
+    const unsub = onValue(ref(db, ".info/connected"), (s) => rlog("collegamento al database:", s.val() ? "OK" : "PERSO"));
+    return () => { document.removeEventListener("visibilitychange", onVis); unsub(); };
+  }, [isGestionale]);
 
   // Il gestionale è l'unico che decide QUANDO parte uno spot in sottofondo (ogni 2 minuti
   // di trasmissione) e lo pubblica su Firebase tramite publishAdPlaying (dentro
@@ -1109,6 +1131,7 @@ export default function RadioPucciotto() {
       stalledChecks = stalled ? stalledChecks + 1 : 0;
       if (stalledChecks < 2) return;
       stalledChecks = 0;
+      rlog("gestionale: player fermo senza motivo, lo faccio ripartire");
       if (c.isCustom) {
         safePlayAudio(audioRef.current).catch(() => {});
       } else {
@@ -1142,7 +1165,7 @@ export default function RadioPucciotto() {
 
   useEffect(() => {
     if (!("mediaSession" in navigator)) return;
-    navigator.mediaSession.setActionHandler("play", () => { unlockAdAudio(); userPausedRef.current = false; setIsPlaying(true); });
+    navigator.mediaSession.setActionHandler("play", () => { rlog("comando di sistema: PLAY"); unlockAdAudio(); userPausedRef.current = false; setIsPlaying(true); });
     // Gestionale: il comando "pausa" del SISTEMA (tasti multimediali, cuffie bluetooth
     // tolte/scollegate, una chiamata Teams/Zoom/WhatsApp che si prende l'audio, un'altra
     // app che parte) va IGNORATO. Prima metteva in pausa la trasmissione intera — e con
@@ -1150,7 +1173,7 @@ export default function RadioPucciotto() {
     // pagina: era una delle cause della "pausa da sola" a scheda in background. Il
     // gestionale si mette in pausa solo dal suo pulsante. L'handler vuoto (non null)
     // serve a impedire anche l'azione predefinita del browser (fermare i media).
-    navigator.mediaSession.setActionHandler("pause", isGestionale ? () => {} : () => { userPausedRef.current = true; setIsPlaying(false); });
+    navigator.mediaSession.setActionHandler("pause", isGestionale ? () => { rlog("comando di sistema: PAUSA (ignorato nel gestionale)"); } : () => { rlog("comando di sistema: PAUSA"); userPausedRef.current = true; setIsPlaying(false); });
     return () => {
       navigator.mediaSession.setActionHandler("play", null);
       navigator.mediaSession.setActionHandler("pause", null);
@@ -1335,6 +1358,7 @@ export default function RadioPucciotto() {
   // video appena avviato dal primo, mandando in stallo il player (da qui la
   // necessità di premere Play manualmente).
   const goNext = () => {
+    rlog("gestionale: brano successivo");
     // Nessuno spot legato al cambio canzone: l'unico meccanismo di spot è quello "ogni N
     // minuti" (timer sul tempo totale di trasmissione). goNext ora si limita a passare al
     // brano successivo.
@@ -1541,6 +1565,7 @@ export default function RadioPucciotto() {
     // Volume dello spot proporzionale al volume generale (niente più +0.2 fisso):
     // a volume generale basso/zero, lo spot deve essere basso/zero anch'esso.
     spotAudio.volume = Math.min(1, volume * adVolume);
+    rlog("gestionale: spot", spotUrl);
     publishAdPlaying(spotUrl);
     // Qualunque spot parta, l'orologio del timer a minuti riparte da qui.
     lastScheduledAdAtRef.current = Date.now();
@@ -1596,11 +1621,13 @@ export default function RadioPucciotto() {
       // il gestionale non è ancora in play, e prima questa scrittura spegneva la diretta
       // per tutti — anche quella che stava andando da un'altra scheda del gestionale.
       if (lastPublishedTrackIdRef.current !== null) {
+        rlog("gestionale: diretta spenta (pausa)");
         set(ref(db, "nowPlaying"), null).catch((e) => console.warn("Firebase write error:", e));
       }
       return;
     }
     const isNewTrack = lastPublishedTrackIdRef.current !== current.id;
+    rlog("gestionale: pubblico", { brano: current.videoId || current.url, titolo: current.title, nuovo: isNewTrack });
     lastPublishedTrackIdRef.current = current.id;
     publishNowPlaying(current, isNewTrack ? 0 : progress);
   }, [current?.id, isPlaying, isGestionale]);
@@ -1636,7 +1663,9 @@ export default function RadioPucciotto() {
     if (isGestionale) return;
     const nowPlayingRef = ref(db, "nowPlaying");
     const unsub = onValue(nowPlayingRef, (snapshot) => {
-      setRadioTrack(snapshot.val());
+      const v = snapshot.val();
+      rlog("diretta ricevuta", v ? { brano: v.videoId || v.url, titolo: v.title, trascorsi: Math.round((Date.now() - (v.startedAt || 0)) / 1000) } : "NESSUNA (diretta ferma)");
+      setRadioTrack(v);
     });
     return () => unsub();
   }, [isGestionale]);
@@ -1711,6 +1740,7 @@ export default function RadioPucciotto() {
     const adPlayingRef = ref(db, "adPlaying");
     const unsub = onValue(adPlayingRef, (snapshot) => {
       const val = snapshot.val();
+      rlog("spot ricevuto", val ? val.url : "fine spot");
       const isLateJoin = !hasSeenFirstAdSnapshotRef.current;
       hasSeenFirstAdSnapshotRef.current = true;
       setAdTrack(val ? { ...val, _isLateJoin: isLateJoin } : null);
@@ -1861,6 +1891,7 @@ export default function RadioPucciotto() {
       if (audioRef.current) safePauseAudio(audioRef.current);
     }
     const id = setTimeout(() => {
+      rlog("diretta ferma da 20s: la radio si mette in pausa");
       lastPublicTrackKeyRef.current = null; // alla ripartenza verrà trattato come brano nuovo
       lastPublicStartedAtRef.current = null;
       keepAliveLoopRef.current = false;
@@ -1888,6 +1919,7 @@ export default function RadioPucciotto() {
       if (!audioRef.current) return;
 
       if (isNewTrack) {
+        rlog("brano nuovo (mp3)", radioTrack.url, { pausaUtente: userPausedRef.current, inPlay: isPlaying });
         lastPublicTrackKeyRef.current = trackKey;
         lastPublicStartedAtRef.current = radioTrack.startedAt;
         // Pause sincrono: stiamo per sostituire subito la sorgente, quindi vogliamo
@@ -1945,6 +1977,7 @@ export default function RadioPucciotto() {
       if (isNewTrack) {
         lastPublicTrackKeyRef.current = trackKey;
         keepAliveLoopRef.current = false; // arriva il brano vero: non è più il loop di attesa
+        rlog("brano nuovo", radioTrack.videoId, { da: Math.round(elapsed), pausaUtente: userPausedRef.current, inPlay: isPlaying });
         if (userPausedRef.current) {
           // L'ascoltatore aveva messo in pausa lui: prepariamo il brano nuovo SENZA farlo
           // partire (prima loadVideoById lo avviava sempre). Al suo Play, il ramo
@@ -1966,6 +1999,7 @@ export default function RadioPucciotto() {
         // (es. un "fine brano" arrivato in ritardo). Invece di restare muti per tutta la
         // canzone, torniamo nel brano al punto giusto e togliamo il muto. Scatta al più
         // tardi col battito di sincronizzazione del gestionale (ogni 15 secondi).
+        rlog("rete di sicurezza: attesa muta sbagliata, ricarico il brano", { da: Math.round(elapsed) });
         keepAliveLoopRef.current = false;
         armSuppressPause();
         ytPlayerRef.current.loadVideoById({ videoId: radioTrack.videoId, startSeconds: elapsed });
@@ -1986,9 +2020,10 @@ export default function RadioPucciotto() {
         // produrre micro-salti continui, solo correzioni vere (es. il gestionale rimasto
         // indietro per pubblicità/buffering, con la radio scappata avanti).
         const cur = ytPlayerRef.current.getCurrentTime?.() || 0;
-        if (Math.abs(elapsed - cur) > 5) ytPlayerRef.current.seekTo(elapsed, true);
+        if (Math.abs(elapsed - cur) > 5) { rlog("riallineo alla diretta", { da: Math.round(cur), a: Math.round(elapsed) }); ytPlayerRef.current.seekTo(elapsed, true); }
         ytPlayerRef.current.playVideo();
       } else {
+        rlog("radio in pausa: fermo il player");
         ytPlayerRef.current.pauseVideo();
       }
     }
@@ -2117,6 +2152,7 @@ export default function RadioPucciotto() {
               unlockAdAudio();
               // Ricorda se è stato l'ascoltatore a mettere in pausa (vedi userPausedRef).
               userPausedRef.current = isPlaying;
+              rlog("ascoltatore preme", isPlaying ? "PAUSA" : "PLAY");
               setIsPlaying(!isPlaying);
             }}
             // Attivo anche a diretta ferma finché la musica sta ancora suonando (i 20 secondi

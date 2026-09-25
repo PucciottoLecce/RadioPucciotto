@@ -135,6 +135,15 @@ proprietario **in italiano**, in modo semplice e senza gergo tecnico.
   e con il codice vero dell'app collegato all'emulatore (`connectDatabaseEmulator`
   con `mockUserToken`). Se si aggiunge un campo a `publishNowPlaying` o un nuovo
   nodo, aggiornare anche le regole, altrimenti il database rifiuta la scrittura.
+- **PR #17**: "scatola nera" (`src/registro.js`, `rlog(...)`): annota in localStorage
+  (ultime 1500 righe, chiavi `rp_log_radio` / `rp_log_gestionale`) stati del player
+  YouTube, diretta e spot ricevuti, decisioni (attesa muta, FINITO ignorato, rete di
+  sicurezza, pause), errori YouTube, cambi brano e pubblicazioni del gestionale,
+  scheda visibile/nascosta, collegamento al database. Nessun cambio di comportamento.
+  Si legge da `/?log` (`src/Registro.jsx`, pulsante Copia) sullo stesso browser.
+  Serve a diagnosticare dal vero: (a) ascoltatore fermo con ▶ e 0:00/0:00 al brano
+  nuovo (il brano non parte da solo, si sblocca col Play); (b) brano che si
+  interrompe e passa al successivo. Prima di correggere questi due, leggere il registro.
 - **Per tornare indietro:** fare il revert del commit di merge della PR su `main`
   (Cloudflare ripubblica da solo).
 - La chiave della cache della playlist nel browser (`CACHE_KEY`, ora
@@ -151,12 +160,13 @@ proprietario **in italiano**, in modo semplice e senza gergo tecnico.
   dati. Le regole vanno messe SOLO dopo che il login è online e verificato,
   altrimenti il gestionale non può più trasmettere. Stato: (1) Cloudflare Access
   attivo e verificato dal proprietario; (2) login online e verificato (PR #15);
-  (3) regole pronte in `database.rules.json` (PR #16), da incollare in Firebase.
+  (3) regole di `database.rules.json` (PR #16) PUBBLICATE in Firebase dal
+  proprietario e verificate (trasmissione ok). Regole precedenti (backup):
+  `nowPlaying`, `adPlaying`, `settings` con `.read` e `.write` a `true`.
 
-- **Sicurezza** (serve il proprietario): chiunque aggiunga `?gestionale`
-  all'indirizzo può trasmettere; Firebase non ha login. La chiave YouTube va
-  limitata al dominio del sito (Google Cloud Console → Credenziali → Referrer HTTP).
-  Una protezione vera richiede login Firebase + regole del database.
+- **Sicurezza, resta solo:** limitare la chiave YouTube al dominio del sito
+  (Google Cloud Console → Credenziali → Referrer HTTP `https://radio.pucciotto.it/*`)
+  e alla sola "YouTube Data API v3".
 - Una categoria con un solo brano si ferma a fine canzone (oggi non succede:
   tutte le categorie hanno molti brani).
 - Codice non usato: `FALLBACK_TRACKS`, `removeCustomTrack`/`isBlob`.
