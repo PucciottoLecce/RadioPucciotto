@@ -8,8 +8,9 @@ proprietario **in italiano**, in modo semplice e senza gergo tecnico.
 - App React + Vite, quasi tutto in `src/App.jsx`. Pubblicata su **Cloudflare
   Pages** da `main`. La variabile `VITE_YOUTUBE_API_KEY` è impostata su Cloudflare.
 - **Due modalità nella stessa pagina:**
-  - `/gestionale`: il **gestionale** (dalla PR #12; prima era `/?gestionale`, che
-    ora apre la radio pubblica). È l'unico che sceglie i brani (API YouTube)
+  - `/gestionale`: il **gestionale** (dalla PR #14; il vecchio `/?gestionale` viene
+    reindirizzato su `/gestionale` da uno script in `index.html`, così passa comunque
+    da Cloudflare Access). È l'unico che sceglie i brani (API YouTube)
     e trasmette su Firebase.
   - `/`: la **radio pubblica** (ascoltatori). Riceve tutto da Firebase e non usa
     l'API YouTube.
