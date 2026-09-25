@@ -88,6 +88,12 @@ proprietario **in italiano**, in modo semplice e senza gergo tecnico.
   lo spot (chi apriva la radio a spot iniziato). Il primo tocco sulla pagina
   (`unlockAdAudio`) non cambia più la sorgente dell'`<audio>` degli spot se sta
   suonando. Verificato in 9 casi (Web Audio, `<audio>`, gestionale).
+  **ANNULLATA (PR #11, revert):** in uso reale, con lo spot che finiva sulla fine
+  della canzone, l'ascoltatore si bloccava invece di far partire la nuova canzone
+  sotto lo spot. Nel browser di prova (YouTube finto) il blocco non si riproduceva:
+  la causa è nel comportamento del player YouTube vero. Torna il comportamento
+  precedente (lo spot si ferma quando il gestionale lo chiude). Non riprovare questa
+  strada senza prima riprodurre il blocco con il player vero.
 - **PR #10**: canzoni indiane (punjabi) ancora presenti in "Internazionali" (la
   classifica GB ne è piena, con titoli in inglese). La verifica finale
   (`keepPlayable`, `videos.list part=snippet,status,contentDetails`, stessa quota)
